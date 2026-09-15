@@ -434,6 +434,19 @@ def audit_code() -> None:
     chk("監視のトラップ判定が、買う側と同じ設定を使っている",
         "penalty >= max_trap" in mon, "監視だけ別の数字を直書きしている")
 
+    # E5 減配の判定が1か所に集約されているか
+    # 実測で、検証スクリプトが自前で年度を切っていて
+    #   ・起点の年から1年目への減配を見落とす
+    #   ・期間の外（horizon+1年目）まで見てしまう（先読み）
+    # という取りこぼしが起きた。判定が2通りあると、同じ銘柄に違う答えが出る。
+    dupes = []
+    for f in sorted((root / "scripts").glob("valid*.py")) + \
+            sorted((root / "modules").glob("valid*.py")):
+        src = src_by_file.get(f, f.read_text())
+        if "had_cut" in src and "build_profile" not in src:
+            dupes.append(f.name)
+    chk("減配の判定が build_profile に統一されている", not dupes, "／".join(dupes))
+
 
 def main() -> int:
     print("=" * 62)
