@@ -1,0 +1,29 @@
+name: datasource-healthcheck
+
+# 定期実行の本体は Mac 側にある（保有情報をリポジトリの外に出さない方針のため、
+# ローカルの SQLite が唯一の正であり、Actions からは触れない）。
+# ここでやるのは「外部データ源が壊れていないか」の見張りだけ。
+# JPX は過去に data_j.xls → data_j.xlsx でURLが404になった実績があり、
+# 土曜のスキャンが動いてから気づくのでは遅い。
+on:
+  schedule:
+    - cron: "0 21 * * 4"   # 金曜 06:00 JST
+  workflow_dispatch:
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.11
+      - run: uv pip install -r requirements.txt
+      - name: JPX と yfinance が生きているか
+        run: uv run python scripts/selfcheck.py
+      - name: 失敗を通知
+        if: failure()
+        run: |
+          curl -H "Title: dividend-scout データ源が壊れている" \
+               -d "JPX か yfinance の取得に失敗しました。土曜のスキャン前に確認してください。" \
+               "https://ntfy.sh/${{ secrets.NTFY_TOPIC }}"

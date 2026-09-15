@@ -22,7 +22,12 @@ gate:
   min_avg_turnover_man: 3000       # 20日平均売買代金（万円）
   max_dividend_cuts_10y: 1         # 直近10年の減配回数
   min_positive_ocf_years: 4        # 直近5期のうち営業CFプラスの期数
+  # 財務の足切りは2本立て。自己資本比率30%の一本槍だと通信・鉄道・電力といった
+  # 設備産業が丸ごと落ちる（実測: NTT の自己資本比率は 20.8%）。
+  # 「自己資本が厚い」か「レバレッジは高いが営業CFで返せる」かのどちらかで通す。
   min_equity_ratio: 0.30           # 自己資本比率（金融を除く）
+  min_equity_ratio_leveraged: 0.15 # レバレッジ型の下限
+  max_net_debt_to_ocf: 10.0        # ネット有利子負債 ÷ 営業CF（年）
   min_equity_ratio_financial: 0.04 # 金融は別基準
   max_payout_ratio: 0.70
   max_fcf_payout_ratio: 1.00
@@ -51,6 +56,10 @@ traps:
   extreme_yield: 0.065        # これ超＋52週安値圏は減配織り込みを疑う
   near_low_threshold: 0.15    # 52週レンジ下位15%を「安値圏」とする
   accrual_gap_threshold: 0.30 # 純利益と営業CFの乖離率
+  payout_creep_delta: 0.20    # 配当性向が前期比でこれだけ跳ねたら警告
+  payout_creep_floor: 0.50    # ただし水準がこれ未満なら余力ありとみなす
+  dilution_threshold: 0.03    # 発行済株数の年間増加率
+  earnings_slide_years: 2     # 純利益が連続で減った期数
 
 portfolio:
   tax_rate_specific: 0.20315  # 特定口座

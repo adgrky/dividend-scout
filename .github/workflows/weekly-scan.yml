@@ -1,0 +1,31 @@
+name: weekly-scan
+
+# 土曜 09:00 JST（= 金曜 00:00 UTC）に全市場をスキャンする
+on:
+  schedule:
+    - cron: "0 0 * * 6"
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.11
+      - run: uv pip install -r requirements.txt
+      - name: 全市場スキャン
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: uv run python scripts/weekly_scan.py
+      - name: 失敗を通知
+        if: failure()
+        run: |
+          curl -H "Title: dividend-scout 週次スキャン失敗" \
+               -d "GitHub Actions のログを確認してください" \
+               "https://ntfy.sh/${{ secrets.NTFY_TOPIC }}"
