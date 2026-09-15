@@ -217,13 +217,20 @@ def evaluate(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
                           + (f"／PER {per:.1f}倍" if per else ""),
                           "ヘムは配当性向50%超・PER15倍超で利確する。"
                           "同じ配当を、より安い銘柄で買い直せる"))
+        # PER で見る分岐には、**自己利回り順位が低いこと**を必ず重ねる。
+        # これが無いと「もともと低利回りの銘柄」を全部拾ってしまう。
+        # 実測: JR東日本は自己利回り順位87%＝**自分史上いちばん安い水準**なのに
+        # 「上がりすぎた」と出ていた（PER16.1・利回り2.06% < 目標4.7%×0.6）。
+        # それは「買うべきでなかった理由」であって「いま売る理由」ではない。
         elif per is not None and per > float(sell.get("rich_per", 15.0)) \
                 and pd.notna(pnl) and pnl >= float(sell.get("rich_min_gain", 0.30)) \
+                and yp is not None \
+                and yp <= float(sell.get("rich_yield_percentile_loose", 0.50)) \
                 and cur_y is not None and pd.notna(cur_y) and pd.notna(tgt) \
                 and cur_y < float(tgt) * float(sell.get("rich_yield_vs_target", 0.6)):
             found.append(("利確を検討", "利回りが目標を大きく下回るところまで買われた",
                           f"PER {per:.1f}倍／現在利回り {cur_y:.2%}（目標 {float(tgt):.2%}）／"
-                          f"含み益 {pnl:+.0%}",
+                          f"自己利回り順位 {yp:.0%}／含み益 {pnl:+.0%}",
                           "インカムの効率が落ちている。利回りの高い銘柄に移す候補"))
 
         # ── ⚪️ 手入れ（売り理由ではない） ─────────────────────────

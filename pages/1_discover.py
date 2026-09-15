@@ -82,6 +82,10 @@ elif scope == "買い増しどき":
     f = f[f["保有"] & (f["yield_percentile"].fillna(0) >= 0.7)]
 elif scope == "保有のみ":
     f = f[f["保有"]]
+if scope in ("買い増しどき", "保有のみ"):
+    st.caption(f"この画面は**採用基準を通った銘柄だけ**を並べています。"
+               f"保有 {len(held)} 銘柄のうち基準を通っているのは {int(view['保有'].sum())} 銘柄です。"
+               "基準を外れている保有は 🧹 資金投入 →「整理する」で見てください。")
 f = f[f["dividend_yield"].fillna(0) >= min_yield]
 f = f[f["streak"].fillna(0) >= min_streak]
 if pick:
@@ -89,7 +93,12 @@ if pick:
 if hem_only:
     f = f[f["hem_ratio"].fillna(0) >= config["scoring"]["hem_ratio_threshold"]]
 if month != "—":
-    f = f[f["配当月"].fillna("").str.contains(month, regex=False)]
+    # 「1月」を含むかで判定すると **「11月」も「1月」を含む**ため混ざる。
+    # 実測: 2月を選ぶと120件出たが、本当に2月配当なのは26件で、残り94件は
+    # 12月銘柄だった。配当月の平準化という目的そのものを壊していた。
+    # 「・」で区切って完全一致で見る。
+    f = f[f["配当月"].fillna("").map(
+        lambda s: month in [x.strip() for x in str(s).split("・") if x.strip()])]
 
 # 資金投入と同じ式で買い付け優先度を出す。画面ごとに違う指標を見せない。
 from modules.allocator import buy_priority, month_gaps          # noqa: E402

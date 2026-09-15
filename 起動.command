@@ -58,9 +58,11 @@ echo ""
 PID=$!
 trap 'kill $PID 2>/dev/null' EXIT INT TERM
 
+OPENED=0
 for i in $(seq 1 100); do
   if curl -fsS "$URL/healthz" >/dev/null 2>&1; then
     open "$URL"
+    OPENED=1
     echo ""
     echo "=================================================="
     echo "  ✅ ブラウザで開きました: $URL"
@@ -74,5 +76,14 @@ for i in $(seq 1 100); do
   kill -0 $PID 2>/dev/null || die "起動に失敗しました。上に出ているメッセージを確認してください"
   sleep 0.3
 done
+
+# 30秒待っても応答が無かったとき、黙って待ち続けると「開かない」に見える。
+if [ "$OPENED" != "1" ]; then
+  echo ""
+  echo "⚠ 30秒待ちましたが、まだ応答がありません。"
+  echo "  ブラウザで次を開いてみてください: $URL"
+  echo "  それでも開かないときは、この窓に出ているメッセージを確認してください。"
+  echo ""
+fi
 
 wait $PID
