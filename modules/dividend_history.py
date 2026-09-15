@@ -36,18 +36,28 @@ _SPIKE_REVERT = 1.15   # 翌年が「スパイク前 × この倍率」以下な
 _CUT_TOLERANCE = 0.995
 
 
+_FY_TOLERANCE_DAYS = 30
+
+
 def annual_dps(div: pd.DataFrame) -> pd.DataFrame:
     """1銘柄の配当明細 -> 年度別 DPS。
 
-    Parameters
-    ----------
-    div : DataFrame
-        columns: date（YYYY-MM-DD 文字列 or datetime）, amount
+    【年度の切り方 — 以前は直近の権利落ち日から1年ずつ遡っていた】
+    権利落ち日は年によって数日ずれる（3月30日 → 3月28日 → 3月28日）。
+    遡るうちにズレが積み上がり、**同じ年度に3回ぶん入る年**ができる。その翌年は
+    2回ぶんしかないので、増減が無くても減配に見える。
 
-    Returns
-    -------
-    DataFrame
-        index: 年度ラベル（バケット終端の暦年）, columns: dps, n_payments, period_end
+        実測（1332 日本水産・2025年6月までで切った場合）
+            2023-03-30 10円 ┐
+            2023-09-28 10円 ├→ 全部「2024年度」に入って 34円
+            2024-03-28 14円 ┘
+            2024-09-27 12円 ┐→「2025年度」は 28円 ＝ 6円の減配に見える
+            2025-03-28 16円 ┘
+
+    3月期の会社の 84% がこれで誤って減配と判定されていた。
+
+    そこで**決算月そのもの**で切る。直近の権利落ち日の月日を年度末とみなし、
+    そこから30日以内の遅れは同じ年度に入れる（権利落ち日のズレを吸収する）。
     """
     if div is None or div.empty:
         return pd.DataFrame(columns=["dps", "n_payments", "period_end"])
@@ -57,27 +67,46 @@ def annual_dps(div: pd.DataFrame) -> pd.DataFrame:
     if d.empty:
         return pd.DataFrame(columns=["dps", "n_payments", "period_end"])
 
-    anchor = d["date"].max()
-    first = d["date"].min()
-    n_years = max(1, int(math.ceil((anchor - first).days / 365.25)) + 1)
+    # 年度末の月は、**直近の権利落ち日から取ってはいけない**。データを途中で
+    # 切ったとき、最後の1回が中間配当だと、その月を年度末と勘違いして年度の
+    # 区切りが半年ずれる（実測: 3月期の明細を9月で切ると年度が全部ずれた）。
+    # 支払月の出現回数から決めれば、どこで切っても同じ答えになる。
+    counts = d["date"].dt.month.value_counts()
+    top = counts.max()
+    tied = [m for m in counts.index if counts[m] == top]
+    # 同数のときの優先順（日本の決算期末の多い順）。ここを固定しておかないと、
+    # データが1件増えるたびに年度の区切りが動いてしまう。
+    order = [3, 12, 9, 6, 2, 5, 8, 11, 1, 4, 7, 10]
+    month = min(tied, key=lambda m: order.index(m) if m in order else 99)
+    days = d.loc[d["date"].dt.month == month, "date"].dt.day
+    day = int(min(days.median(), 28))
 
-    # バケット n = (anchor - (n+1)年, anchor - n年]
-    edges = [anchor - pd.DateOffset(years=n) for n in range(n_years + 1)]
-    rows = []
-    for n in range(n_years):
-        hi, lo = edges[n], edges[n + 1]
-        sel = d[(d["date"] > lo) & (d["date"] <= hi)]
-        if sel.empty:
-            continue
-        rows.append({
-            "year": int(hi.year),
-            "dps": float(sel["amount"].sum()),
-            "n_payments": int(len(sel)),
-            "period_end": hi.strftime("%Y-%m-%d"),
-        })
-    if not rows:
-        return pd.DataFrame(columns=["dps", "n_payments", "period_end"])
-    out = pd.DataFrame(rows).set_index("year").sort_index()
+    def label(ts: pd.Timestamp) -> int:
+        """その配当がどの年度のものか。年度末は anchor と同じ月日。"""
+        fy_end = pd.Timestamp(year=ts.year, month=month, day=day)
+        return ts.year if (ts - fy_end).days <= _FY_TOLERANCE_DAYS else ts.year + 1
+
+    d["year"] = [label(ts) for ts in d["date"]]
+    g = d.groupby("year")
+    out = pd.DataFrame({
+        "dps": g["amount"].sum(),
+        "n_payments": g["amount"].size(),
+        "period_end": [pd.Timestamp(year=int(y), month=month, day=day).strftime("%Y-%m-%d")
+                       for y in g.groups],
+    }).sort_index()
+    out.index.name = "year"
+
+    # 端の年が「途中まで」のときは落とす。
+    # 中間配当だけ済んでいて期末配当がまだ、という年は回数が足りないので、
+    # 残したままだと**毎年9月から3月までのあいだ、全社が減配したように見える**。
+    # 同じことがデータを途中で切ったときにも起きる（検証で先を見ないために切る）。
+    if len(out) >= 3:
+        usual = int(out["n_payments"].iloc[1:-1].mode().iloc[0]) \
+            if len(out) >= 4 else int(out["n_payments"].median())
+        if out["n_payments"].iloc[-1] < usual:
+            out = out.iloc[:-1]
+        if len(out) >= 3 and out["n_payments"].iloc[0] < usual:
+            out = out.iloc[1:]
     return out
 
 

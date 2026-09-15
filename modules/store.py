@@ -27,6 +27,8 @@ ORM は使わず生 SQL。DB はローカルが唯一の正で、保有情報は
 """
 from __future__ import annotations
 
+import math
+
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -317,7 +319,23 @@ def upsert_df(table: str, df: pd.DataFrame, columns: Iterable[str],
     sub = df.reindex(columns=columns)
     placeholders = ",".join("?" * len(columns))
     sql = f"INSERT OR REPLACE INTO {table} ({','.join(columns)}) VALUES ({placeholders})"
-    rows = [tuple(None if pd.isna(v) else v for v in rec) for rec in sub.itertuples(index=False, name=None)]
+    # 無限大を通さない。yfinance は赤字の会社の PER に Infinity を返すことがあり
+    # （実測: 2676.T / 3543.T）、SQLite はそれを **文字列 "Infinity"** として
+    # 書き込む。読み戻すと列全体が文字列になり、`df["per"] > 0` で落ちる。
+    # 週次スキャンが止まる原因になるので、書き込む手前で必ず落とす。
+    def _clean(v):
+        if v is None:
+            return None
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        try:
+            if pd.isna(v):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return v
+
+    rows = [tuple(_clean(v) for v in rec) for rec in sub.itertuples(index=False, name=None)]
     with connect(path) as conn:
         for i in range(0, len(rows), chunk):
             conn.executemany(sql, rows[i:i + chunk])

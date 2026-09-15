@@ -115,6 +115,48 @@ def audit_numbers() -> None:
             np.allclose(lad["日経平均の水準"].values, want))
         chk("投入割合の合計が100%", abs(lad["投入する割合"].sum() - 1.0) < 1e-9)
 
+    section("A6 年度の切り方（作った配当明細で確かめる）")
+    from modules.dividend_history import annual_dps, build_profile
+    # 2026-09-16 に見つかったバグの再発防止。権利落ち日は年ごとに数日ずれる。
+    # 直近の権利落ち日から1年ずつ遡って切ると、ズレが積み上がって
+    # 「1年に3回ぶん入る年」ができ、その翌年が減配に見える。
+    # ここは実データではなく**作った明細**で見る（実データが変わっても意味が変わらない）。
+    drift = pd.DataFrame({
+        "date": ["2021-03-30", "2021-09-29", "2022-03-30", "2022-09-29",
+                 "2023-03-30", "2023-09-28", "2024-03-28", "2024-09-27",
+                 "2025-03-28"],
+        "amount": [8, 8, 9, 9, 10, 10, 14, 12, 16],
+    })
+    tbl = annual_dps(drift)
+    chk("権利落ち日が数日ずれても1年は2回ぶん",
+        (tbl["n_payments"].iloc[1:] == 2).all(), tbl["n_payments"].tolist())
+    chk("増配しかしていない明細で減配が出ない",
+        build_profile("TEST", drift).cuts_all == 0,
+        f"減配 {build_profile('TEST', drift).cuts_all} 回／{dict(tbl['dps'])}")
+    # 途中で切っても、全期間で見ても、同じ年度の配当は同じ額でなければならない
+    cut_short = drift[drift["date"] <= "2024-09-27"]
+    a = annual_dps(cut_short)["dps"]
+    b = annual_dps(drift)["dps"]
+    common = a.index.intersection(b.index)
+    chk("途中で切っても年度ごとの配当が変わらない",
+        bool((a[common] == b[common]).all()),
+        f"切った版 {dict(a[common])} ／ 全期間 {dict(b[common])}")
+    # 本物の減配は見落とさない
+    real_cut = pd.DataFrame({
+        "date": ["2022-03-30", "2022-09-29", "2023-03-30", "2023-09-28",
+                 "2024-03-28", "2024-09-27"],
+        "amount": [20, 20, 20, 20, 10, 10],
+    })
+    chk("本物の減配は拾える", build_profile("TEST", real_cut).cuts_all == 1,
+        f"減配 {build_profile('TEST', real_cut).cuts_all} 回")
+    # 中間配当だけ済んでいて期末配当がまだ、という時期（毎年9月〜3月）。
+    # そのまま数えると全社が減配したように見える。
+    mid_year = pd.concat([drift, pd.DataFrame({"date": ["2025-09-29"],
+                                               "amount": [17]})], ignore_index=True)
+    pr = build_profile("TEST", mid_year)
+    chk("期末配当がまだの年を減配と数えない", pr.cuts_all == 0,
+        f"減配 {pr.cuts_all} 回／{pr.series}")
+
 
 # ──────────────────────────────────────────── B 画面をまたいだ矛盾
 def audit_contradictions() -> None:
@@ -432,7 +474,8 @@ def audit_code() -> None:
     # E4 監視と買う側で、トラップの足切りが揃っているか
     mon = src_by_file[root / "modules" / "monitor.py"]
     chk("監視のトラップ判定が、買う側と同じ設定を使っている",
-        "penalty >= max_trap" in mon, "監視だけ別の数字を直書きしている")
+        "penalty >= max_trap" in mon,
+        "NG なら監視だけ別の数字を直書きしている")
 
     # E5 減配の判定が1か所に集約されているか
     # 実測で、検証スクリプトが自前で年度を切っていて
@@ -441,11 +484,55 @@ def audit_code() -> None:
     # という取りこぼしが起きた。判定が2通りあると、同じ銘柄に違う答えが出る。
     dupes = []
     for f in sorted((root / "scripts").glob("valid*.py")) + \
-            sorted((root / "modules").glob("valid*.py")):
+            sorted((root / "modules").glob("valid*.py")) + \
+            [root / "modules" / "hist_panel.py"]:
+        if not f.exists():
+            continue
         src = src_by_file.get(f, f.read_text())
-        if "had_cut" in src and "build_profile" not in src:
+        # 減配を扱っているのに、判定を自前で書いている（共有の入り口を通っていない）
+        uses_cut = "had_cut" in src or "cut_1y" in src or "cut_" in src and "cut_years" in src
+        shared = ("build_profile" in src or "load_cached" in src
+                  or "from modules.hist_panel" in src)
+        if uses_cut and not shared:
             dupes.append(f.name)
     chk("減配の判定が build_profile に統一されている", not dupes, "／".join(dupes))
+
+    # E6 年度の切り方が1か所に集約されているか
+    # 実測（2026-09-16）: income_risk が「4月〜翌3月」と決め打ちしていて、
+    # dividend_history.annual_dps と定義が食い違っていた。同じ「2019年度の配当」が
+    # 画面によって別の数字になる。年度を自前で切っているファイルを見つける。
+    fy_dupes = []
+    for f in sorted((root / "modules").glob("*.py")):
+        if f.name in ("dividend_history.py", "hist_panel.py", "jp_calendar.py"):
+            continue
+        src = src_by_file.get(f, f.read_text())
+        if '-04-01' in src and "annual_dps" not in src:
+            fy_dupes.append(f.name)
+    chk("年度の切り方が annual_dps に統一されている", not fy_dupes, "／".join(fy_dupes))
+
+    # E7 数値の列に文字列が紛れ込んでいないか
+    # 実測（2026-09-16）: yfinance が赤字の会社の PER に Infinity を返し、SQLite が
+    # それを **文字列 "Infinity"** として保存していた。読み戻すと列全体が文字列になり、
+    # `df["per"] > 0` で週次スキャンが落ちる。画面には何も出ないまま更新が止まる。
+    from modules.store import read_df as _rdf
+    numeric = {
+        "snapshots": ["market_cap", "per", "pbr", "roe", "payout_ratio"],
+        "quotes": ["last_close", "high_52w", "low_52w", "pos_52w", "avg_turnover"],
+        "scores": ["total", "health", "trap_penalty"],
+        "fundamentals": ["net_income", "operating_cf", "free_cf", "shares"],
+        "edinet_summary": ["eps", "dps", "net_income", "operating_cf"],
+    }
+    dirty = []
+    for table, cols in numeric.items():
+        for c in cols:
+            try:
+                n = _rdf(f"SELECT COUNT(*) n FROM {table} "
+                         f"WHERE {c} IS NOT NULL AND typeof({c}) = 'text'")["n"].iloc[0]
+            except Exception:
+                continue
+            if int(n):
+                dirty.append(f"{table}.{c} に {int(n)} 行")
+    chk("数値の列に文字列が入っていない", not dirty, "／".join(dirty))
 
 
 def main() -> int:

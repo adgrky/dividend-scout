@@ -20,3 +20,7 @@ __pycache__/
 *.swp
 *.log
 logs/*.log
+
+# 検証の中間ファイル
+data/*.csv
+data/.backfill_state

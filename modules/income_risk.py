@@ -2,7 +2,8 @@
 
 【なぜ必要か】
 2026-09-15 の検証で、いちばん重い数字が残った。
-**最良の選び方（高利回り × 減配歴なし）でも、5年で 54.7% が減配する。**
+**最良の選び方（高利回り × 減配歴なし）でも、5年で 39.5% が減配する。**
+（2026-09-16 に年度の切り方のバグを直して測り直した値。それ以前は 54.7% と出ていた）
 選別でこれ以上下げられないことは、業種で下げようとして失敗したことで確かめた
 （業種ごとの減配率は 46.6%〜82.0% と差があるのに、2014年と2020年の順位相関は 0.08）。
 
@@ -21,25 +22,50 @@ from __future__ import annotations
 
 import pandas as pd
 
+from modules.dividend_history import annual_dps
 from modules.store import read_df
 
-# 実際に起きた不況。年度は 4月〜翌3月。
+# 実際に起きた不況。(名前, 平時の年, 傷んだ年の範囲, 説明)
+#
+# 「傷んだ年」を1年に決め打ちすると、会社ごとに減配の出る年がずれる（決算期が違う、
+# 期末で減らす会社と翌期の中間で減らす会社がある）。実測でも、全上場の減配銘柄の
+# 割合は リーマンで 2009年 41.0% → 2010年 30.7%、コロナで 2020年 21.4% →
+# 2021年 26.3% と2年にまたがっていた。**範囲の中でいちばん低かった年**を取る。
 EVENTS = [
-    ("リーマン・ショック", 2007, 2009,
-     "世界金融危機。日本の配当は2009年度に最も落ちた"),
-    ("コロナ・ショック", 2019, 2020,
+    ("リーマン・ショック", 2007, (2009, 2010),
+     "世界金融危機。全上場の41%が減配し、翌年もまだ31%が減らした"),
+    ("コロナ・ショック", 2019, (2020, 2021),
      "需要が消えた業種と、そうでない業種の差が大きかった"),
-    ("東日本大震災", 2010, 2011,
+    ("東日本大震災", 2010, (2011, 2012),
      "供給網の断絶。影響は業種によって偏った"),
 ]
 
 
+def _worst_dps(div: pd.DataFrame, ticker: str, years: tuple[int, int]) -> float:
+    """その期間のうち、いちばん配当が低かった年の1株配当。"""
+    vals = [_fiscal_dps(div, ticker, y) for y in range(years[0], years[1] + 1)]
+    vals = [v for v in vals if v is not None]
+    return min(vals) if vals else 0.0
+
+
 def _fiscal_dps(div: pd.DataFrame, ticker: str, year: int) -> float:
-    """その年度（4月〜翌3月）の1株配当の合計。"""
-    g = div[(div["ticker"] == ticker)
-            & (div["date"] >= pd.Timestamp(f"{year}-04-01"))
-            & (div["date"] < pd.Timestamp(f"{year + 1}-04-01"))]
-    return float(g["amount"].sum())
+    """その年度の1株配当の合計。
+
+    以前はここで「4月〜翌3月」と決め打ちしていた。だが3月期以外の会社では
+    2つの年度をまたいでしまう（9月期の会社なら、9月の期末配当と翌3月の中間配当を
+    足すことになる）。しかも年度の切り方が modules/dividend_history.annual_dps と
+    違っていたので、同じ「2019年度の配当」が画面によって別の数字になりえた。
+
+    年度の切り方はアプリの中で1つに統一する。annual_dps は各社の権利落ち日から
+    決算月を割り出し、権利落ち日の数日のズレも吸収する。
+    """
+    g = div[div["ticker"] == ticker]
+    if g.empty:
+        return 0.0
+    table = annual_dps(g[["date", "amount"]])
+    if table.empty or year not in table.index:
+        return 0.0
+    return float(table.loc[year, "dps"])
 
 
 def concentration(pos: pd.DataFrame) -> dict:
@@ -94,7 +120,7 @@ def stress_test(pos: pd.DataFrame) -> pd.DataFrame:
             b = _fiscal_dps(div, t, before)
             if b <= 0:
                 continue                       # 当時まだ配当が無い＝分からない
-            a = _fiscal_dps(div, t, after)
+            a = _worst_dps(div, t, after)
             w = float(now.get(t, 0.0))
             measured += w
             n_have += 1
@@ -108,7 +134,7 @@ def stress_test(pos: pd.DataFrame) -> pd.DataFrame:
         rows.append({
             "できごと": label,
             "説明": note,
-            "年度": f"{before} → {after}",
+            "年度": f"{before} → {after[0]}〜{after[1]} の最低",
             "調べられた銘柄": n_have,
             "うち減配": n_cut,
             "調べられた配当の割合": measured / total_now if total_now else 0,
@@ -138,7 +164,7 @@ def worst_contributors(pos: pd.DataFrame, event: str, top: int = 10) -> pd.DataF
         b = _fiscal_dps(div, t, before)
         if b <= 0:
             continue
-        a = _fiscal_dps(div, t, after)
+        a = _worst_dps(div, t, after)
         ratio = min(a / b, 1.0)
         if ratio >= 0.999:
             continue
