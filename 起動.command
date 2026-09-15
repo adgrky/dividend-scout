@@ -1,43 +1,78 @@
 #!/usr/bin/env bash
 # dividend-scout 起動スクリプト
+#
 # Finder でダブルクリックすると、ターミナルが開いてアプリがブラウザで立ち上がります。
-# 閉じるときは、ターミナルの画面で Control + C。
+#
+# 【大事】このターミナルの窓は、アプリを使っているあいだ開けたままにしてください。
+#         窓を閉じるとアプリも止まります。終わるときは Control + C。
 
-set -e
 cd "$(dirname "$0")"
 
-echo "🔭 dividend-scout"
-
-if [ ! -d ".venv" ]; then
-  if ! command -v uv >/dev/null 2>&1; then
-    echo "⚠ uv が見つかりません。先にこれを実行してください:"
-    echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"
-    read -n 1 -s -r -p "Enter キーでウィンドウを閉じます…"
-    exit 1
-  fi
-  echo "▶ 初回起動: 環境を作っています（数分かかります）…"
-  uv venv --python 3.11
-  uv pip install -r requirements.txt
-  shasum requirements.txt > .venv/.reqs.sha
-else
-  # 毎回 uv を呼ぶと起動が遅くなるので、requirements.txt が変わったときだけ入れ直す
-  if ! shasum -c .venv/.reqs.sha >/dev/null 2>&1; then
-    echo "▶ 必要なものを更新しています…"
-    uv pip install -r requirements.txt
-    shasum requirements.txt > .venv/.reqs.sha
-  fi
-fi
-
-if [ ! -f "data/scout.db" ]; then
-  echo ""
-  echo "⚠ データがまだありません。先に全市場スキャンが必要です（約15分）:"
-  echo "    uv run python scripts/weekly_scan.py"
-  echo ""
-  read -n 1 -s -r -p "Enter キーでウィンドウを閉じます…"
-  exit 1
-fi
-
-echo "▶ ブラウザが開きます。終了するには Control + C"
+echo ""
+echo "=================================================="
+echo "  🔭 dividend-scout"
+echo "=================================================="
 echo ""
 
-exec .venv/bin/streamlit run app.py --server.port 8502
+die() { echo ""; echo "⚠ $1"; echo ""; read -n 1 -s -r -p "Enter キーでこの窓を閉じます…"; exit 1; }
+
+# ── 環境の用意（初回だけ）──
+if [ ! -d ".venv" ]; then
+  command -v uv >/dev/null 2>&1 || die "uv が見つかりません。ターミナルで次を実行してください:
+    curl -LsSf https://astral.sh/uv/install.sh | sh"
+  echo "▶ 初回起動: 環境を作っています（数分かかります）…"
+  uv venv --python 3.11 || die "環境の作成に失敗しました"
+  uv pip install -r requirements.txt || die "必要なものの取得に失敗しました"
+  shasum requirements.txt > .venv/.reqs.sha
+elif ! shasum -c .venv/.reqs.sha >/dev/null 2>&1; then
+  # 毎回 uv を呼ぶと起動が遅くなるので、requirements.txt が変わったときだけ更新する
+  echo "▶ 必要なものを更新しています…"
+  uv pip install -r requirements.txt || die "更新に失敗しました"
+  shasum requirements.txt > .venv/.reqs.sha
+fi
+
+[ -f "data/scout.db" ] || die "データがまだありません。先にターミナルで次を実行してください（約15分）:
+    cd \"$(pwd)\"
+    .venv/bin/python scripts/weekly_scan.py"
+
+# ── 空いているポートを探す ──
+# 8502 が誰かに使われていると Streamlit は起動に失敗する。黙って別の番号に逃がす。
+PORT=8502
+while lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; do
+  PORT=$((PORT+1))
+  [ $PORT -gt 8520 ] && die "空いているポートが見つかりませんでした"
+done
+
+URL="http://localhost:$PORT"
+
+echo "▶ 起動中… $URL"
+echo ""
+
+# ── サーバーを起動し、応答を確認してからブラウザを開く ──
+# Streamlit 任せにすると環境によってブラウザが開かないことがあるので、
+# ここで自分で開く。
+.venv/bin/streamlit run app.py \
+  --server.port "$PORT" \
+  --server.headless true \
+  --browser.gatherUsageStats false &
+PID=$!
+trap 'kill $PID 2>/dev/null' EXIT INT TERM
+
+for i in $(seq 1 100); do
+  if curl -fsS "$URL/healthz" >/dev/null 2>&1; then
+    open "$URL"
+    echo ""
+    echo "=================================================="
+    echo "  ✅ ブラウザで開きました: $URL"
+    echo ""
+    echo "  この窓は開けたままにしてください。"
+    echo "  終わるときは Control + C。"
+    echo "=================================================="
+    echo ""
+    break
+  fi
+  kill -0 $PID 2>/dev/null || die "起動に失敗しました。上に出ているメッセージを確認してください"
+  sleep 0.3
+done
+
+wait $PID
