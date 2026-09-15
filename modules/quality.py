@@ -18,42 +18,8 @@ MAX_WEEKLY_JUMP = 20.0
 # 分割比率として妥当な範囲。1/1000（1000株併合）〜1000倍分割まで。
 MIN_SPLIT_RATIO = 1e-3
 MAX_SPLIT_RATIO = 1e3
-
-
-def price_series_is_sane(close: pd.Series) -> tuple[bool, str]:
-    """終値の系列が壊れていないか。"""
-    c = close.dropna()
-    if len(c) < 2:
-        return True, ""
-    if (c <= 0).any():
-        return False, "終値に0以下が含まれる"
-    ratio = (c / c.shift(1)).dropna()
-    worst_up = ratio.max()
-    worst_dn = ratio.min()
-    if worst_up > MAX_WEEKLY_JUMP:
-        idx = ratio.idxmax()
-        return False, f"終値が1期間で {worst_up:,.0f} 倍に跳ねている（{idx:%Y-%m-%d}）"
-    if worst_dn < 1 / MAX_WEEKLY_JUMP:
-        idx = ratio.idxmin()
-        return False, f"終値が1期間で 1/{1 / worst_dn:,.0f} に落ちている（{idx:%Y-%m-%d}）"
-    return True, ""
-
-
 def split_is_sane(ratio: float) -> bool:
     return MIN_SPLIT_RATIO <= float(ratio) <= MAX_SPLIT_RATIO
-
-
-def find_broken_tickers(prices: pd.DataFrame) -> pd.DataFrame:
-    """縦持ちの価格テーブルから壊れた銘柄を洗い出す。"""
-    rows = []
-    for ticker, g in prices.groupby("ticker", sort=False):
-        s = pd.Series(g["close"].values, index=pd.to_datetime(g["date"])).sort_index()
-        ok, reason = price_series_is_sane(s)
-        if not ok:
-            rows.append({"ticker": ticker, "理由": reason})
-    return pd.DataFrame(rows)
-
-
 def winsorize(s: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd.Series:
     """裾を刈って平均を使えるようにする。中央値を見るなら不要。"""
     v = s.dropna()
@@ -71,20 +37,6 @@ def last_bad_jump(close: pd.Series) -> pd.Timestamp | None:
     ratio = (c / c.shift(1)).dropna()
     bad = ratio[(ratio > MAX_WEEKLY_JUMP) | (ratio < 1 / MAX_WEEKLY_JUMP)]
     return bad.index.max() if len(bad) else None
-
-
-def trim_to_sane(close: pd.Series) -> pd.Series:
-    """破損箇所より後だけ残す。
-
-    銘柄ごと捨てない。実測した39銘柄のうち大半は2002〜2013年の古い分割が
-    未調整なだけで、直近のデータは正しい。丸ごと捨てると使える履歴まで失う。
-    """
-    at = last_bad_jump(close)
-    if at is None:
-        return close
-    return close[close.index > at]
-
-
 def trim_frame(prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """縦持ちの価格テーブルから破損区間を落とす。
 

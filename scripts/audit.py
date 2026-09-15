@@ -353,6 +353,88 @@ def audit_writes() -> None:
         shutil.rmtree(tmp.parent, ignore_errors=True)
 
 
+# ──────────────────────────────────────────── E コードの健全性
+def audit_code() -> None:
+    """これまで実際に出たバグの「型」を機械で洗う。
+
+    手で気づけたものだけ直していると、同じ型のバグが別の場所で再発する。
+    実際に出た型:
+        ・設定にあるのにコードが直書きしていて、つまみが効かない
+        ・同じ概念に2つの閾値があり、画面ごとに答えが変わる
+        ・置き換え済みの関数が残っていて、誤って使われる
+        ・画面の入力がどこにも使われていない
+    """
+    import ast
+    import re
+    import yaml
+
+    section("E コードの健全性")
+    root = Path(__file__).resolve().parent.parent
+    files = (sorted((root / "modules").glob("*.py")) + sorted((root / "views").glob("*.py"))
+             + sorted((root / "scripts").glob("*.py")) + [root / "app.py"])
+    src_by_file = {f: f.read_text() for f in files}
+    allsrc = "\n".join(src_by_file.values())
+
+    # E1 設定にあるのに読んでいない項目＝効かないつまみ
+    cfg = yaml.safe_load((root / "config.yaml").read_text())
+
+    def walk(d, path=()):
+        for k, v in (d or {}).items():
+            if isinstance(v, dict):
+                yield from walk(v, path + (k,))
+            else:
+                yield path + (k,), v
+
+    unread = []
+    for path, v in walk(cfg):
+        if isinstance(v, list) and all(isinstance(x, dict) for x in (v or [])):
+            continue
+        if not re.search(rf'["\']{re.escape(path[-1])}["\']', allsrc):
+            unread.append(".".join(path))
+    chk("設定の項目がすべてコードから読まれている（効かないつまみが無い）",
+        not unread, "／".join(unread))
+
+    # E2 画面の入力が使われているか
+    dead_widgets = []
+    for f in sorted((root / "views").glob("*.py")):
+        src = src_by_file[f]
+        for n in ast.walk(ast.parse(src)):
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
+                w = getattr(n.value.func, "attr", None)
+                if w in ("number_input", "slider", "selectbox", "multiselect", "checkbox",
+                         "radio", "text_input", "text_area", "date_input", "toggle"):
+                    for t in n.targets:
+                        if isinstance(t, ast.Name) and \
+                                len(re.findall(rf"\b{re.escape(t.id)}\b", src)) <= 1:
+                            dead_widgets.append(f"{f.name}:{n.lineno} {t.id}")
+    chk("画面の入力がすべて実際に使われている", not dead_widgets, "／".join(dead_widgets))
+
+    # E3 置き換え済みの関数が残っていないか
+    defined = {}
+    for f in files:
+        for n in ast.walk(ast.parse(src_by_file[f])):
+            if isinstance(n, ast.FunctionDef) and not n.name.startswith("_"):
+                defined.setdefault(n.name, []).append(f"{f.name}:{n.lineno}")
+    # 入口になる関数や、スクリプトから呼ばれるものは対象外
+    keep = {"main", "flash", "show_flash"}
+    dead = []
+    for n, where in defined.items():
+        if n in keep:
+            continue
+        # 定義行そのものを除いて、名前がどこかに現れるか。
+        # 「fn(」だけを数えると、辞書やタプルに関数を入れて渡す書き方
+        # （("capacity", score_capacity) など）を見落とす。
+        occurrences = len(re.findall(rf"\b{re.escape(n)}\b", allsrc))
+        if occurrences - len(where) <= 0:
+            dead.append(f"{n}（{where[0]}）")
+    chk("使われていない関数が残っていない", not dead, "／".join(sorted(dead)))
+
+    # E4 監視と買う側で、トラップの足切りが揃っているか
+    mon = src_by_file[root / "modules" / "monitor.py"]
+    chk("監視のトラップ判定が、買う側と同じ設定を使っている",
+        "penalty >= max_trap" in mon, "監視だけ別の数字を直書きしている")
+
+
 def main() -> int:
     print("=" * 62)
     print("  dividend-scout  機械的な検算")
@@ -361,6 +443,7 @@ def main() -> int:
     audit_contradictions()
     audit_edges()
     audit_writes()
+    audit_code()
     print("\n" + "=" * 62)
     if NG:
         print(f"  ⚠️  NG {len(NG)} 件")

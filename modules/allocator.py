@@ -325,8 +325,3 @@ def _odd_lot_fee(amount: float, shares: int, lot: int) -> float:
     単元で買うなら手数料はほぼ無視できるので0。
     """
     return round(amount * 0.0022, 0) if lot < 100 else 0.0
-def rebalance_funds(review: pd.DataFrame) -> float:
-    """整理候補を売却した場合に作れる資金。"""
-    if review is None or review.empty:
-        return 0.0
-    return float(review["eval_value"].sum())

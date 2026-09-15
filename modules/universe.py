@@ -70,7 +70,3 @@ def fetch_universe(markets: list[str] | None = None) -> pd.DataFrame:
     out = out[(out["code"] != "") & (out["sector33"] != "-")]
     out["ticker"] = out["code"].map(to_ticker)
     return out[["ticker", "code", "name", "sector33", "market", "scale"]].reset_index(drop=True)
-
-
-def is_financial(sector33: str, config: dict) -> bool:
-    return sector33 in set(config["universe"]["financial_sectors"])

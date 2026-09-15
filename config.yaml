@@ -59,7 +59,6 @@ scoring:
   # ゲートにすると 402 → 53 銘柄まで落ちて情報を捨てるので、加点指標として使う。
   hem_ratio_threshold: 1.0
   yield_percentile_window_years: 7
-  dps_cagr_years: [5, 10]
 
 traps:
   extreme_yield: 0.065        # これ超＋52週安値圏は減配織り込みを疑う

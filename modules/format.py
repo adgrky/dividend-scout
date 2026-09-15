@@ -38,15 +38,6 @@ def num(v, digits: int = 1) -> str:
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return "—"
     return f"{v:,.{digits}f}"
-
-
-def after_tax(amount: float, account: str, config: dict) -> float:
-    """税引後の受取額。NISA は非課税、特定口座は 20.315%。"""
-    rate = (config["portfolio"]["tax_rate_nisa"] if account == "nisa"
-            else config["portfolio"]["tax_rate_specific"])
-    return float(amount) * (1 - rate)
-
-
 def csv_bytes(df: pd.DataFrame) -> bytes:
     """Excel で開いても文字化けしない CSV。"""
     return df.to_csv(index=False).encode("utf-8-sig")

@@ -43,10 +43,6 @@ def get_watchlist() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def get_quotes() -> pd.DataFrame:
-    return read_df("SELECT * FROM quotes")
-
-
 @st.cache_data(ttl=600, show_spinner=False)
 def get_dividend_profile(ticker: str) -> dict:
     from modules.dividend_history import build_profile
@@ -69,18 +65,6 @@ def no_data_guard(df: pd.DataFrame, what: str = "スコア") -> bool:
         "```bash\nuv run python scripts/weekly_scan.py\n```"
     )
     return True
-
-
-def score_bar(row: pd.Series) -> None:
-    """5層の内訳を横並びで見せる。総合点だけ見せてもブラックボックスになる。"""
-    cols = st.columns(len(LAYER_LABELS) + 1)
-    for col, (key, label) in zip(cols, LAYER_LABELS.items()):
-        val = row.get(key)
-        col.metric(label, f"{val:.0f}" if pd.notna(val) else "—")
-    penalty = row.get("trap_penalty") or 0
-    cols[-1].metric("トラップ減点", f"-{penalty:.0f}" if penalty else "なし")
-
-
 @st.cache_data(ttl=3600, show_spinner="権利落ち日を計算中...")
 def get_next_ex_dates(tickers: tuple[str, ...] | None = None) -> pd.DataFrame:
     """次の権利落ち日（配当履歴からの予測）。"""

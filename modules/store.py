@@ -344,23 +344,3 @@ def latest_scores(path: Path | None = None) -> pd.DataFrame:
         LEFT JOIN quotes q ON q.ticker = s.ticker
         WHERE s.asof = (SELECT MAX(asof) FROM scores)
     """, path=path)
-
-
-def get_setting(key: str, default=None, path: Path | None = None):
-    with connect(path) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    if row is None:
-        return default
-    try:
-        return json.loads(row["value"])
-    except Exception:
-        return row["value"]
-
-
-def set_setting(key: str, value, path: Path | None = None) -> None:
-    with connect(path) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) "
-            "VALUES (?, ?, datetime('now'))",
-            (key, json.dumps(value, ensure_ascii=False)),
-        )
