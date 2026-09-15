@@ -291,7 +291,8 @@ _RAW_KEYS = ["dividend_yield", "yield_percentile", "dps_latest", "hem_ratio",
              "streak", "streak_no_cut",
              "cuts_10y", "cagr_5y", "cagr_10y", "payout_ratio", "fcf_cover",
              "net_cash_ratio", "net_debt_to_ocf", "equity_ratio", "roe", "per", "pbr",
-             "market_cap_oku", "avg_turnover_man", "ni_cagr", "ocf_cagr", "pos_52w"]
+             "market_cap_oku", "avg_turnover_man", "ni_cagr", "ocf_cagr", "pos_52w",
+             "operating_margin", "held_pct_institutions", "fcf_payout_ratio"]
 
 
 def _round(v):

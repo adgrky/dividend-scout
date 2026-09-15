@@ -56,7 +56,9 @@ def attach(review: pd.DataFrame) -> pd.DataFrame:
 
 
 def sell_priority(review: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """どれから整理すべきかの順位。
+    """
+    ※ 使っていない。整理の優先度は modules/sell_rules.evaluate が出す。
+どれから整理すべきかの順位。
 
     「配当が危ない」ほど、そして「金額が大きい」ほど先に手をつける価値がある。
     含み損の銘柄を先に売れば、特定口座では譲渡益と相殺できて税金が軽くなる。

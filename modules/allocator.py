@@ -136,7 +136,8 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
              config: dict, max_names: int = 12,
              per_name_cap_pct: float = 0.25,
              require_below_target: bool = True,
-             month_gap: dict[int, float] | None = None) -> pd.DataFrame:
+             month_gap: dict[int, float] | None = None,
+             allow_single_lot: bool = True) -> pd.DataFrame:
     """入金額を候補に割り振る。
 
     Parameters
@@ -148,6 +149,20 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
         1銘柄あたりの投入上限（今回の入金額に対する比率）
     require_below_target : bool
         目標利回りに届いている銘柄だけを対象にする
+    allow_single_lot : bool
+        上限に収まらなくても、1単元だけなら買うことを許す
+
+    【なぜ2周するか】
+    日本株は100株単位でしか買えない。1単元の値段は10万〜70万円が普通なので、
+    「1銘柄あたり入金の15%まで」といった上限を素直に当てると、単元がその上限を
+    超える銘柄が全部落ちる。実測では、入金50万円（投入枠30万円）に対して
+    **上位25銘柄のうち買えたのは3銘柄だけ**で、¥99,430 しか配れずに
+    ¥200,570 が宙に浮いていた。しかも画面にはそれが「暴落用の現金」に見えていた。
+
+    そこで2周する。
+        1周目  上限を守って、分散を優先して配る
+        2周目  余ったお金で、上限を超えても1単元だけなら買う
+               （ただし1銘柄が入金の single_lot_max を超えることはしない）
     """
     if candidates is None or candidates.empty or cash <= 0:
         return pd.DataFrame()
@@ -171,51 +186,74 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
     c = c.sort_values("買い付け優先度", ascending=False)
 
     per_name_cap = cash * per_name_cap_pct
+    single_lot_max = cash * float(config["buy_priority"].get("single_lot_max", 0.5))
     remaining = cash
     picks = []
+    taken: set = set()
 
-    for _, r in c.iterrows():
-        if len(picks) >= max_names or remaining < r["last_close"] * _LOT:
-            continue
+    def _try(r, cap_amount: float, relaxed: bool) -> bool:
+        nonlocal remaining
+        price = r["last_close"]
+        lot_cost = price * _LOT
+        if len(picks) >= max_names or remaining < lot_cost or r["ticker"] in taken:
+            return False
         sector = r.get("sector33")
         used = float(sector_now.get(sector, 0.0)) + sum(
             p["投入額"] for p in picks if p["業種"] == sector)
         room = cap_sector * total_after - used
-        if room <= 0:
-            continue
-        budget = min(per_name_cap, remaining, room)
-        shares = _lot_size(r["last_close"], budget)
+        if room <= 0 or lot_cost > room:
+            return False
+        shares = _lot_size(price, min(cap_amount, remaining, room))
         if shares < _LOT:
-            continue
-        amount = shares * r["last_close"]
-        picks.append({
-            "ticker": r["ticker"],
-            "コード": r.get("code"),
-            "銘柄名": r.get("name"),
-            "業種": sector,
-            "株価": r["last_close"],
-            "株数": shares,
-            "投入額": amount,
-            "利回り": r.get("dividend_yield"),
-            "年間配当": amount * (r.get("dividend_yield") or 0),
-            "買い付け優先度": r["買い付け優先度"],
-            "割安度": r["_割安度"],
-            "自己利回り順位": r["_自己利回り順位"],
-            "絶対利回り順位": r["_絶対利回り順位"],
-            "継続": r["_継続"],
-            "目標到達": r["_目標到達"],
-            "補完度": r["_補完度"],
-            "トラップ減点": r.get("trap_penalty", 0),
-            "発掘スコア": r.get("total"),
-            "配当月": r.get("payout_months"),
-            "業種の空き枠": max(cap_sector * total_after - used, 0.0),
-        })
+            if not relaxed or lot_cost > min(remaining, room, single_lot_max):
+                return False
+            shares = _LOT          # 上限は超えるが1単元だけ入れる
+        amount = shares * price
+        picks.append(_pick(r, sector, shares, amount, cap_sector * total_after - used,
+                           relaxed and amount > cap_amount))
+        taken.add(r["ticker"])
         remaining -= amount
+        return True
+
+    for _, r in c.iterrows():
+        _try(r, per_name_cap, relaxed=False)
+    if allow_single_lot:
+        # 余ったお金で、上限を超えても1単元だけなら買う2周目
+        for _, r in c.iterrows():
+            if remaining <= 0 or len(picks) >= max_names:
+                break
+            _try(r, per_name_cap, relaxed=True)
 
     out = pd.DataFrame(picks)
     if not out.empty:
         out.attrs["残り"] = remaining
     return out
+
+
+def _pick(r, sector, shares, amount, sector_room, relaxed: bool) -> dict:
+    return {
+        "ticker": r["ticker"],
+        "コード": r.get("code"),
+        "銘柄名": r.get("name"),
+        "業種": sector,
+        "株価": r["last_close"],
+        "株数": shares,
+        "投入額": amount,
+        "利回り": r.get("dividend_yield"),
+        "年間配当": amount * (r.get("dividend_yield") or 0),
+        "買い付け優先度": r["買い付け優先度"],
+        "割安度": r["_割安度"],
+        "自己利回り順位": r["_自己利回り順位"],
+        "絶対利回り順位": r["_絶対利回り順位"],
+        "継続": r["_継続"],
+        "目標到達": r["_目標到達"],
+        "補完度": r["_補完度"],
+        "トラップ減点": r.get("trap_penalty", 0),
+        "発掘スコア": r.get("total"),
+        "配当月": r.get("payout_months"),
+        "業種の空き枠": max(sector_room, 0.0),
+        "上限を超えて1単元": relaxed,
+    }
 
 
 def rebalance_funds(review: pd.DataFrame) -> float:

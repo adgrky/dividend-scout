@@ -19,16 +19,6 @@ from modules.validation import (Cohort, OUTCOMES, TESTABLE_FACTORS, benchmark,
 st.title("🧪 検証")
 st.caption("スコアの予測力を過去データで確かめる。効かない層の重みは上げない。")
 
-st.info("""**なぜ必ずこれを通すか**
-
-別プロジェクト（stock-recommender）で13個の銘柄選別指標を測ったところ、相関がすべて |r| < 0.1 で
-「銘柄選別に上乗せできる情報は無い」という結果が出ている。配当成長は時間軸が違うので同じ結論とは
-限らないが、確かめずに信じたら同じ失敗になる。
-
-**検証できるのは、株価と配当履歴から過去時点を再現できる層だけ**（B 増配意思 / E 割安 /
-D 見過ごされ度の一部）。A 増配余力と C 原資成長は yfinance の財務が4〜5期分しか取れないため
-過去時点を再現できず、**検証不能**。EDINET を入れるまで等ウェイトのまま据え置く。""")
-
 c1, c2, c3 = st.columns(3)
 with c1:
     years = st.multiselect("起点にする年（12月末）", [2012, 2014, 2016, 2018, 2020],
@@ -108,9 +98,22 @@ tab1, tab2, tab3, tab4 = st.tabs(["指標の説明力", "分位別の実績", "�
 with tab1:
     power = factor_power(allc)
     pivot = power.pivot(index="指標", columns="実績", values="相関")
-    st.dataframe(pivot.round(3), width="stretch",
-                 column_config={c: st.column_config.NumberColumn(format="%.3f") for c in pivot.columns})
-    st.caption("スピアマンの順位相関。|相関| < 0.05 はノイズ。0.10 を超えたら意味がある可能性がある。")
+    st.markdown("**表の数字 ＝ 順位相関**。"
+                "「その指標が高かった銘柄は、実際にその後どうだったか」を −1〜+1 で表したもの。")
+    st.markdown("""
+| 数字 | 読み方 |
+|---|---|
+| **+0.10 以上** | その指標が高いほど結果も良かった。**使える可能性がある** |
+| −0.05 〜 +0.05 | ほぼ無関係。**ノイズ**。スコアに入れる理由がない |
+| **−0.10 以下** | その指標が高いほど結果は悪かった。**逆に使うべき** |
+
++1 は完全に一致、0 は無関係、−1 は完全に逆。株の世界では 0.10 でも十分大きい数字です。
+""")
+    st.dataframe(pivot.round(3), width="stretch", column_config={
+        c: st.column_config.NumberColumn(
+            format="%.3f",
+            help="+0.10以上なら使える可能性／±0.05以内はノイズ／−0.10以下は逆に効いている")
+        for c in pivot.columns})
     if power["相関"].abs().max() < 0.10:
         st.error("0.10 を超えた指標が1つもありません。"
                  "**スコアで銘柄を選べるという前提そのものを疑う必要があります。**")
@@ -126,7 +129,9 @@ with tab1:
     if not sub.empty:
         st.dataframe(sub.pivot(index="指標", columns="コホート", values="相関").round(3),
                      width="stretch")
-        st.caption("符号がコホートごとに入れ替わる指標は、効いていないと考えるべき。")
+        st.caption("**縦が指標、横が起点にした年**。同じ指標が年によってプラスになったり"
+                   "マイナスになったりするなら、たまたまであって効いていません。"
+                   "どの年も同じ符号で 0.10 を超えている指標だけが本物です。")
 
 with tab2:
     factor_label = st.selectbox("指標", list(TESTABLE_FACTORS.keys()))
@@ -145,8 +150,11 @@ with tab2:
         st.dataframe(tv, hide_index=True, width="stretch",
                      column_config={"平均": st.column_config.NumberColumn(format="%.1f%%"),
                                     "中央値": st.column_config.NumberColumn(format="%.1f%%")})
-        st.caption("Q5 が最上位。Q1→Q5 で単調に上がっていれば本物の可能性がある。"
-                   "途中で山や谷があるなら、たまたま。")
+        st.caption("**銘柄をその指標の順に5組へ分けて、その後の実績を組ごとに集計したもの。** "
+                   "Q1 が最下位の2割、Q5 が最上位の2割。「平均」は裾の極端な銘柄に引っ張られるので、"
+                   "**中央値を見てください**（真ん中の銘柄がどうだったか）。\n\n"
+                   "Q1→Q5 でなだらかに上がっていれば本物の可能性があります。"
+                   "途中で山や谷があるなら、たまたまです。")
 
 with tab3:
     bench = benchmark(allc).copy()
@@ -156,7 +164,19 @@ with tab3:
     st.dataframe(bench, hide_index=True, width="stretch",
                  column_config={c: st.column_config.NumberColumn(format="%.1f%%")
                                 for c in pct_cols})
-    st.caption("スコアがこれらに勝てないなら、複雑なスコアを使う理由がない。")
+    st.markdown("""
+**列の意味**
+
+| 列 | 何の数字か |
+|---|---|
+| リターン中央値 | 買って持っていた期間の値上がり＋配当。**真ん中の銘柄**がどうだったか |
+| リターン平均（裾を刈る） | 上下5%の極端な銘柄を除いた平均 |
+| DPS成長 中央値 | 1株あたり配当が何%増えたか |
+| 減配発生率 | その組のうち、期間中に減配した銘柄の割合。**低いほど良い** |
+
+いちばん上の行が「何も考えず全銘柄を等分で持った場合」です。
+**スコアで選んだ組がこれに勝てないなら、複雑なスコアを使う理由がありません。**
+""")
 
 with tab4:
     ys = sorted(frames)
@@ -166,8 +186,15 @@ with tab4:
         half = len(ys) // 2 or 1
         train = pd.concat([frames[y] for y in ys[:half]], ignore_index=True)
         test = pd.concat([frames[y] for y in ys[half:]], ignore_index=True)
-        st.caption(f"学習: {ys[:half]} → 検証: {ys[half:]}　"
-                   "全期間の最良値でチューニングすると、後から何の意味もない数字が出てくる。")
+        st.markdown(f"""
+**前半 {ys[:half]} 年のデータだけで重みを決めて、後半 {ys[half:]} 年で答え合わせをします。**
+
+全期間をまとめて最良の重みを探すと、過去にだけよく当てはまる数字が出てきて、
+これから先にはまったく効きません。だから必ず分けます。
+
+下の表は「前半で決めた重みを後半に当てたら、実際どうだったか」。
+**後半でも上位の組が上位のままなら本物**、順位が入れ替わるなら偶然です。
+""")
         res = composite_test(train, test, outcome=outcome_col).copy()
         for col in res.columns:
             if res[col].dtype.kind == "f":

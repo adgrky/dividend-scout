@@ -20,7 +20,7 @@ def load_positions(config: dict) -> pd.DataFrame:
     u = read_df("SELECT ticker, code, name AS name_jpx, sector33, market FROM universe").set_index("ticker")
     sc = read_df(
         "SELECT ticker, total, health, capacity, willingness, growth, neglect, valuation, "
-        "trap_penalty, gate_passed, gate_reason FROM scores "
+        "trap_penalty, gate_passed, gate_reason, detail_json FROM scores "
         "WHERE asof = (SELECT MAX(asof) FROM scores)"
     ).set_index("ticker")
 
@@ -101,7 +101,9 @@ def dividend_calendar(pos: pd.DataFrame) -> pd.DataFrame:
 
 
 def review_candidates(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """整理を検討すべき保有。判断はケンがする。ここは材料を並べるだけ。
+    """
+    ※ 使っていない。modules/sell_rules.evaluate に置き換え済み（買う基準を売る基準に流用していたため）。
+整理を検討すべき保有。判断はケンがする。ここは材料を並べるだけ。
 
     重さを分ける。「配当が危ない」と「保有額が小さい」を同じ扱いにすると、
     実測で114銘柄中99銘柄が候補になり、どれから手をつけるか分からなくなる。
@@ -189,3 +191,67 @@ def dividends_received(config: dict) -> pd.DataFrame:
     tx["年"] = tx["date"].dt.year
     tx["月"] = tx["date"].dt.month
     return tx
+
+
+def expected_dividends(pos: pd.DataFrame, config: dict, months_back: int = 12,
+                       lag_days: int = 75) -> pd.DataFrame:
+    """保有株数と配当履歴から、受け取ったはずの配当を組み立てる。
+
+    証券会社の計算書を1件ずつ写すのは続かない。**権利落ち日 × 保有株数**から
+    自動で作り、ケンは金額を直すだけにする。
+
+    注意：株数はいまの保有数を使う。権利確定の時点で株数が違っていた場合は
+    金額がずれるので、画面側で必ず直せるようにしておくこと。
+    入金は権利落ちから2〜3か月後なので、受取日は lag_days 後を置く。
+    """
+    if pos is None or pos.empty:
+        return pd.DataFrame()
+    tickers = sorted(set(pos["ticker"]))
+    ph = ",".join("?" * len(tickers))
+    div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({ph})",
+                  tuple(tickers))
+    if div.empty:
+        return pd.DataFrame()
+    div["date"] = pd.to_datetime(div["date"])
+    today = pd.Timestamp.today().normalize()
+    since = today - pd.DateOffset(months=months_back)
+    div = div[(div["date"] >= since) & (div["date"] <= today)]
+    if div.empty:
+        return pd.DataFrame()
+
+    # すでに記録した配当は出さない（同じ銘柄・同じ権利落ち月は1回きり）
+    done = read_df("SELECT ticker, account, date FROM transactions WHERE type='dividend'")
+    seen = set()
+    if not done.empty:
+        d = pd.to_datetime(done["date"])
+        seen = set(zip(done["ticker"], done["account"], d.dt.to_period("M").astype(str)))
+
+    rate_s = float(config["portfolio"]["tax_rate_specific"])
+    rows = []
+    for _, h in pos.iterrows():
+        g = div[div["ticker"] == h["ticker"]]
+        for _, r in g.iterrows():
+            pay = (r["date"] + pd.Timedelta(days=lag_days)).normalize()
+            if pay > today:
+                continue
+            key = (h["ticker"], h["account"], pay.to_period("M").__str__())
+            if key in seen:
+                continue
+            gross = float(h["shares"]) * float(r["amount"])
+            tax = 0.0 if h["account"] == "nisa" else gross * rate_s
+            rows.append({
+                "記録する": True,
+                "コード": str(h.get("code") or h["ticker"][:-2]),
+                "銘柄名": h.get("name"),
+                "口座": "NISA" if h["account"] == "nisa" else "特定",
+                "権利落ち日": r["date"].date(),
+                "受取日": pay.date(),
+                "株数": float(h["shares"]),
+                "1株配当": float(r["amount"]),
+                "税引前": round(gross, 0),
+                "受取額（税引後）": round(gross - tax, 0),
+                "_ticker": h["ticker"], "_account": h["account"],
+            })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["受取日", "銘柄名"]).reset_index(drop=True)

@@ -1,0 +1,310 @@
+"""売る理由を、事実にもとづいて判定する。
+
+【設計の前提】
+以前は `review_candidates` が「新規買いのゲートを外れたか」で整理候補を出していた。
+実測すると保有114銘柄のうち84銘柄が「重大」になり、その中身は
+
+    三菱UFJ・群馬銀行  営業CFがマイナス  → 銀行は貸出を増やすと営業CFがマイナスになる。正常
+    トヨタ自動車       FCFで配当を賄えていない → 金融事業込みのFCF。売り理由ではない
+    MS&AD             配当性向が計算できない → 単なるデータ欠損。連続増配17年
+    黒田グループ       上場5年未満 → 新規上場は売り理由ではない
+    イントラスト       売買代金が薄い → 流動性は「買う前に確かめること」
+
+という、売る理由になっていないものばかりだった。
+
+**買わない理由と、売る理由は別物。**
+買うときは選択肢が3,700あるので厳しくてよい。持っている株を売るのは
+税金・スプレッド・再投資先の確保というコストを払う行為なので、
+「配当が壊れた」という事実にだけ反応させる。
+
+【4つの段階】
+    🔴 売却を検討   配当そのものが壊れた（事実として起きたこと）
+    🟡 監視を強める  配当の原資が傷んでいる（まだ配当は出ている）
+    🟢 利確を検討   ヘムの「上がりすぎたら売る」。壊れたのではなく育ちきった
+    ⚪️ 手入れ       売る理由ではない。額が小さい・口座が分かれている等
+
+【適用しないもの】
+    金融（銀行・保険・証券）には営業CF・FCF・有利子負債の基準を当てない
+    データが欠けているだけのものは「判定待ち」に回し、売り理由にしない
+    上場年数・売買代金・時価総額は新規買いの条件であって売り理由にしない
+"""
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pandas as pd
+
+from modules.store import read_df
+
+# 重大度の並び順と、優先度の基準点
+# 基準点。ここを高くしすぎると上限100で頭打ちになり、同じ重さの中で
+# 金額の差が効かなくなる（実測で1株3,240円の銘柄が84万円の銘柄より上に来ていた）。
+SEVERITY = {
+    "売却を検討": ("🔴", 72),
+    "監視を強める": ("🟡", 44),
+    "利確を検討": ("🟢", 26),
+    "手入れ": ("⚪️", 4),
+    "判定待ち": ("⏳", 0),
+}
+SEVERITY_ORDER = list(SEVERITY)
+
+# 営業CF・FCF・有利子負債の基準を当てない業種。
+# 銀行は貸出が増えると営業CFがマイナスになり、保険は責任準備金で歪む。
+_FINANCIAL = {"銀行業", "保険業", "証券、商品先物取引業", "その他金融業"}
+
+
+def _periods(tickers: list[str]) -> dict[str, pd.DataFrame]:
+    """銘柄ごとの期別財務（新しい期が先頭）。"""
+    if not tickers:
+        return {}
+    ph = ",".join("?" * len(tickers))
+    f = read_df(
+        f"SELECT ticker, fiscal_end, net_income, operating_cf, total_equity, total_assets "
+        f"FROM fundamentals WHERE ticker IN ({ph}) ORDER BY ticker, fiscal_end DESC",
+        tuple(tickers))
+    return {t: g.reset_index(drop=True) for t, g in f.groupby("ticker")} if not f.empty else {}
+
+
+def _dps_series(tickers: list[str]) -> dict[str, pd.Series]:
+    if not tickers:
+        return {}
+    ph = ",".join("?" * len(tickers))
+    div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({ph})",
+                  tuple(tickers))
+    if div.empty:
+        return {}
+    from modules.dividend_history import build_profiles
+    return {t: pd.Series(p.series).sort_index() for t, p in build_profiles(div).items()}
+
+
+def _consecutive(vals: list[float], test) -> int:
+    """先頭（直近）から何期連続で test を満たすか。"""
+    n = 0
+    for v in vals:
+        if v is None or (isinstance(v, float) and np.isnan(v)) or not test(v):
+            break
+        n += 1
+    return n
+
+
+def evaluate(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """保有1行ごとに、売る理由を判定して返す。
+
+    返る列
+        重さ            売却を検討 / 監視を強める / 利確を検討 / 手入れ / 判定待ち
+        印              🔴🟡🟢⚪️⏳
+        理由            そのまま読める日本語（複数は改行区切り）
+        根拠            数値の実物
+        やること        次の一手
+        整理の優先度    0-100
+    """
+    if pos is None or pos.empty:
+        return pd.DataFrame()
+
+    sell = config.get("sell", {})
+    total = float(pos["eval_value"].sum()) or 1.0
+    tickers = sorted(set(pos["ticker"]))
+    fund = _periods(tickers)
+    dps = _dps_series(tickers)
+    dup = pos.groupby("ticker")["account"].nunique()
+
+    rows = []
+    for _, r in pos.iterrows():
+        t = r["ticker"]
+        sector = str(r.get("sector33") or "")
+        is_fin = sector in _FINANCIAL
+        detail = {}
+        try:
+            detail = json.loads(r.get("detail_json") or "{}")
+        except Exception:
+            detail = {}
+        raw = detail.get("raw", {}) if isinstance(detail, dict) else {}
+        traps = detail.get("traps", []) if isinstance(detail, dict) else []
+
+        payout = raw.get("payout_ratio")
+        streak = int(r.get("streak") or 0)
+        cuts = int(r.get("cuts_10y") or 0)
+        no_cut = r.get("streak_no_cut")
+        f = fund.get(t)
+        ni = f["net_income"].tolist() if f is not None else []
+        ocf = f["operating_cf"].tolist() if f is not None else []
+
+        found: list[tuple[str, str, str, str]] = []   # (重さ, 理由, 根拠, やること)
+
+        # ── 🔴 配当そのものが壊れた ───────────────────────────────
+        if pd.notna(no_cut) and int(no_cut) == 0 and cuts >= 1:
+            found.append(("売却を検討", "直近の配当年度で減配した",
+                          f"10年の減配 {cuts} 回／連続増配は途切れている",
+                          "ヘムの唯一の絶対ルール。増配を前提に買ったなら前提が消えている"))
+        if cuts >= int(sell.get("cuts_10y_serious", 3)):
+            found.append(("売却を検討", f"10年で {cuts} 回も減配している",
+                          f"減配 {cuts} 回／連続増配 {streak} 年",
+                          "景気で配当を動かす会社。増配を積み上げる器ではない"))
+        if payout is not None and payout > float(sell.get("payout_unsustainable", 1.0)) \
+                and streak < int(sell.get("payout_grace_streak", 10)):
+            found.append(("売却を検討", "利益を超えて配当を出している",
+                          f"配当性向 {payout:.0%}（100%超）／連続増配 {streak} 年",
+                          "取り崩しで配当を維持している。続かない"))
+
+        # ── 🟡 原資が傷んでいる（金融には当てない） ─────────────────
+        if not is_fin:
+            neg_ocf = _consecutive(ocf, lambda v: v < 0)
+            if neg_ocf >= int(sell.get("neg_ocf_years", 2)):
+                found.append(("監視を強める", f"営業キャッシュフローが {neg_ocf} 期連続でマイナス",
+                              f"直近の営業CF {', '.join(f'{v/1e8:,.0f}億' for v in ocf[:3] if v is not None)}",
+                              "配当の原資そのものが無い。次の決算で戻らなければ降りる"))
+            neg_ni = _consecutive(ni, lambda v: v < 0)
+            if neg_ni >= int(sell.get("loss_years", 2)):
+                found.append(("監視を強める", f"最終赤字が {neg_ni} 期連続",
+                              f"直近の純利益 {', '.join(f'{v/1e8:,.0f}億' for v in ni[:3] if v is not None)}",
+                              "赤字のまま配当を続けると自己資本が削れる"))
+            ndo = raw.get("net_debt_to_ocf")
+            eq = raw.get("equity_ratio")
+            if ndo is not None and eq is not None \
+                    and ndo > float(sell.get("net_debt_to_ocf_danger", 15)) \
+                    and eq < float(sell.get("equity_ratio_danger", 0.20)):
+                found.append(("監視を強める", "借金が重く、自己資本が薄い",
+                              f"ネット有利子負債 ÷ 営業CF {ndo:.0f}年／自己資本比率 {eq:.0%}",
+                              "金利が上がる・稼ぎが落ちると、真っ先に配当が削られる"))
+
+        # 減益が続いている × 配当性向が高い＝次の減配の予備軍
+        dec_ni = 0
+        for a, b in zip(ni, ni[1:]):
+            if a is None or b is None or np.isnan(a) or np.isnan(b) or a >= b:
+                break
+            dec_ni += 1
+        if dec_ni >= int(sell.get("earnings_slide_years", 2)) and payout is not None \
+                and payout > float(sell.get("payout_watch", 0.60)):
+            found.append(("監視を強める", f"純利益が {dec_ni} 期連続で減っていて、配当性向も高い",
+                          f"配当性向 {payout:.0%}／純利益 {dec_ni} 期連続の減益",
+                          "利益が戻らなければ、配当性向が100%に届いて減配になる"))
+
+        for tr in traps:
+            found.append(("監視を強める", str(tr), "スキャン時の減点判定",
+                          "増配の前提が細っていないか、次の決算で確かめる"))
+
+        # 配当継続スコアが著しく低く、かつ実際に減配歴がある
+        hl = r.get("health")
+        if pd.notna(hl) and hl < float(sell.get("health_danger", 30)) and cuts >= 1:
+            found.append(("監視を強める", "配当継続スコアが著しく低く、減配歴もある",
+                          f"配当継続スコア {hl:.0f}（50が真ん中）／10年の減配 {cuts} 回",
+                          "増配余力・増配意思・原資成長がそろって弱い。買い増しの対象からは外す"))
+
+        # ── 🟡 増配が止まった ────────────────────────────────────
+        s = dps.get(t)
+        if s is not None and len(s) >= 4:
+            recent = s.iloc[-4:]
+            flat = int((recent.diff().dropna().abs() < 1e-9).sum())
+            if flat >= int(sell.get("flat_dps_years", 3)) and payout is not None \
+                    and payout > float(sell.get("flat_payout_floor", 0.50)):
+                found.append(("監視を強める", f"配当が {flat} 年すえ置きのまま、配当性向だけが高い",
+                              f"1株配当 {'→'.join(f'{v:.0f}円' for v in recent)}／"
+                              f"配当性向 {payout:.0%}",
+                              "増配で育つ前提が崩れている。増配余地のある銘柄に入れ替える価値がある"))
+
+        # ── 🟢 利確を検討（ヘムの「上がりすぎたら売る」） ──────────────
+        yp = raw.get("yield_percentile")
+        per = raw.get("per")
+        pnl = r.get("pnl_pct")
+        cur_y = r.get("current_yield")
+        tgt = r.get("target_yield")
+        if yp is not None and pd.notna(pnl) \
+                and yp <= float(sell.get("rich_yield_percentile", 0.15)) \
+                and pnl >= float(sell.get("rich_min_gain", 0.30)):
+            found.append(("利確を検討", "この会社としては、めったにない高い株価になっている",
+                          f"自己利回り順位 {yp:.0%}（低いほど株価が高い）／含み益 {pnl:+.0%}"
+                          + (f"／PER {per:.1f}倍" if per else ""),
+                          "ヘムは配当性向50%超・PER15倍超で利確する。"
+                          "同じ配当を、より安い銘柄で買い直せる"))
+        elif per is not None and per > float(sell.get("rich_per", 15.0)) \
+                and pd.notna(pnl) and pnl >= float(sell.get("rich_min_gain", 0.30)) \
+                and cur_y is not None and pd.notna(cur_y) and pd.notna(tgt) \
+                and cur_y < float(tgt) * float(sell.get("rich_yield_vs_target", 0.6)):
+            found.append(("利確を検討", "利回りが目標を大きく下回るところまで買われた",
+                          f"PER {per:.1f}倍／現在利回り {cur_y:.2%}（目標 {float(tgt):.2%}）／"
+                          f"含み益 {pnl:+.0%}",
+                          "インカムの効率が落ちている。利回りの高い銘柄に移す候補"))
+
+        # ── ⚪️ 手入れ（売り理由ではない） ─────────────────────────
+        share = r["eval_value"] / total
+        if share < float(sell.get("tiny_position", 0.003)):
+            found.append(("手入れ", f"保有額が小さい（全体の {share:.2%}）",
+                          f"評価額 {r['eval_value']:,.0f} 円",
+                          "売るか、単元を足して意味のある大きさにするか。持ち続けても害はない"))
+        if dup.get(t, 1) > 1 and share < float(sell.get("tiny_position", 0.003)) * 3:
+            found.append(("手入れ", "同じ銘柄が2つの口座に分かれていて、こちら側が小さい",
+                          f"{int(dup[t])} 口座／こちらは全体の {share:.2%}",
+                          "NISA側に寄せると配当の手取りが約2割増える。まとめる候補"))
+
+        # ── ⏳ 判定待ち ─────────────────────────────────────────
+        if not found:
+            missing = []
+            if payout is None:
+                missing.append("配当性向")
+            if not ni:
+                missing.append("財務")
+            if missing:
+                rows.append(_row(r, "判定待ち",
+                                 [(f"{'・'.join(missing)}がまだ取れていない", "—",
+                                   "`uv run python scripts/weekly_scan.py --missing-only` で埋まる")],
+                                 share, total))
+            continue
+
+        # 最も重いものを代表にする
+        sev = min((x[0] for x in found), key=lambda s: SEVERITY_ORDER.index(s))
+        rows.append(_row(r, sev, [(f[1], f[2], f[3]) for f in found if f[0] == sev]
+                         + [(f"（{f[0]}）{f[1]}", f[2], f[3]) for f in found if f[0] != sev],
+                         share, total, n_rules=len(found)))
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out["_o"] = out["重さ"].map({k: i for i, k in enumerate(SEVERITY_ORDER)})
+    return out.sort_values(["_o", "整理の優先度"], ascending=[True, False]).drop(columns="_o")
+
+
+def _row(r: pd.Series, sev: str, found: list[tuple[str, str, str]],
+         share: float, total: float, n_rules: int = 1) -> dict:
+    mark, base = SEVERITY[sev]
+    if sev == "判定待ち":
+        return {
+            "account": r["account"], "ticker": r["ticker"], "code": r.get("code"),
+            "name": r.get("name"), "sector33": r.get("sector33"),
+            "shares": r.get("shares"), "avg_cost": r.get("avg_cost"),
+            "last_close": r.get("last_close"), "eval_value": r.get("eval_value"),
+            "pnl_pct": r.get("pnl_pct"), "health": r.get("health"),
+            "streak": r.get("streak"), "dps_latest": r.get("dps_latest"),
+            "target_yield": r.get("target_yield"), "構成比": share, "重さ": sev, "印": mark,
+            "理由": "\n".join(f"・{a}" for a, _, _ in found),
+            "根拠": "\n".join(f"・{b}" for _, b, _ in found),
+            "やること": "\n".join(f"・{c}" for _, _, c in found),
+            "件数": len(found), "整理の優先度": 0.0,
+        }
+    # 同じ重さの中では、金額が大きいものと、含み損で税金がかからないものを先に。
+    size = min(share / 0.02, 1.0) * 100          # 全体の2%で満点
+    pnl = r.get("pnl_pct")
+    tax_ease = 50.0 if pd.isna(pnl) else float(np.clip(-pnl * 100, -50, 50) + 50)
+    prio = base + 3 * (n_rules - 1) + 0.15 * size + 0.03 * tax_ease
+    return {
+        "account": r["account"], "ticker": r["ticker"], "code": r.get("code"),
+        "name": r.get("name"), "sector33": r.get("sector33"),
+        "shares": r.get("shares"), "avg_cost": r.get("avg_cost"),
+        "last_close": r.get("last_close"), "eval_value": r.get("eval_value"),
+        "pnl_pct": pnl, "health": r.get("health"), "streak": r.get("streak"),
+        "dps_latest": r.get("dps_latest"), "target_yield": r.get("target_yield"),
+        "構成比": share,
+        "重さ": sev, "印": mark,
+        "理由": "\n".join(f"・{a}" for a, _, _ in found),
+        "根拠": "\n".join(f"・{b}" for _, b, _ in found),
+        "やること": "\n".join(f"・{c}" for _, _, c in found),
+        "件数": len(found),
+        "整理の優先度": round(min(prio, 100.0), 0),
+    }
+
+
+def summary(ev: pd.DataFrame) -> dict[str, int]:
+    if ev is None or ev.empty:
+        return {k: 0 for k in SEVERITY_ORDER}
+    c = ev["重さ"].value_counts().to_dict()
+    return {k: int(c.get(k, 0)) for k in SEVERITY_ORDER}

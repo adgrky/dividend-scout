@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+from modules import explain as E
 from modules.format import pct, to_pct, yen, yen_short
 from modules.store import read_df
 from modules.ui import (LAYER_LABELS, get_config, get_dividend_profile, get_prices,
@@ -86,11 +87,43 @@ if not company.empty:
 # 中身が薄いときは英文の会社概要で補う。
 ja_is_thin = (not biz_ja) or len(biz_ja) < 60 or "参照" in biz_ja[:80]
 
+def _lead(text: str, limit: int = 180) -> str:
+    """先頭の1〜2文だけを取り出して「要するに何屋か」を作る。
+
+    有報の「事業の内容」は数千字あることがあり、400字で切ると文の途中で
+    切れて意味が取れなくなっていた。先に要点を出し、全文は畳んで読めるようにする。
+    """
+    out = ""
+    for sent in text.replace("。", "。\n").split("\n"):
+        if not sent.strip():
+            continue
+        if out and len(out) + len(sent) > limit:
+            break
+        out += sent
+        if len(out) >= limit:
+            break
+    return out or text[:limit]
+
+
 if biz_ja:
-    st.info(biz_ja[:400] + ("…" if len(biz_ja) > 400 else ""))
+    st.info(_lead(biz_ja))
+    if len(biz_ja) > len(_lead(biz_ja)):
+        with st.expander(f"事業の内容を全文で読む（{len(biz_ja):,} 字）"):
+            st.markdown(
+                f"<div style='max-height:420px;overflow-y:auto;padding:12px 16px;"
+                f"border:1px solid rgba(128,128,128,.3);border-radius:8px;"
+                f"line-height:1.8;white-space:pre-wrap'>{biz_ja}</div>",
+                unsafe_allow_html=True)
     st.caption("出典：有価証券報告書「事業の内容」")
 if ja_is_thin and biz_en:
     st.info(biz_en[:400] + ("…" if len(biz_en) > 400 else ""))
+    if len(biz_en) > 400:
+        with st.expander("英文の会社概要を全文で読む"):
+            st.markdown(
+                f"<div style='max-height:420px;overflow-y:auto;padding:12px 16px;"
+                f"border:1px solid rgba(128,128,128,.3);border-radius:8px;"
+                f"line-height:1.8;white-space:pre-wrap'>{biz_en}</div>",
+                unsafe_allow_html=True)
     st.caption("出典：yfinance の会社概要（有報の記載が参照のみだったため補足）")
 if not biz_ja and not biz_en:
     st.warning(f"事業の内容がまだ取れていません（{row['sector33']}／{row['market']}）。"
@@ -109,20 +142,51 @@ st.divider()
 
 # ── 1. なぜ増配が続くと考えられるか ──
 st.subheader("1. なぜ増配が続くと考えられるか")
-st.caption("各点数は、採用基準を通った約700社の中での順位です。50点が真ん中。")
+st.info("""**点数の読み方**
+
+点数は **0〜100 の順位** です。採用基準を通った約700社を並べたとき、この銘柄が
+どのあたりにいるかを表します。**50点が真ん中**。80点なら上位20%、20点なら下位20%。
+
+点数は順位なので、元になった実数とは別物です。**両方を並べています。**
+たとえば「FCF配当カバー率 18点／実数 -0.3倍」なら、
+*順位は下位2割で、実際に本業の現金が配当に足りていない* と読みます。""")
 
 cols = st.columns(len(LAYER_LABELS) + 1)
 for col, (key, label) in zip(cols, LAYER_LABELS.items()):
-    col.metric(label, f"{row[key]:.0f}" if pd.notna(row.get(key)) else "—")
+    v = row.get(key)
+    verdict, _ = E.verdict(v)
+    col.metric(label, f"{v:.0f}" if pd.notna(v) else "—", verdict,
+               delta_color="off", help=E.LAYER_MEANING[key][1])
 penalty = row.get("trap_penalty") or 0
-cols[-1].metric("トラップ減点", f"-{penalty:.0f}" if penalty else "なし")
+cols[-1].metric("トラップ減点", f"-{penalty:.0f}" if penalty else "なし",
+                help="高配当トラップの疑いがあるときに引く点。0なら疑いなし")
 
-cols = st.columns(len(LAYER_LABELS))
-for col, (key, label) in zip(cols, LAYER_LABELS.items()):
-    with col:
-        st.markdown(f"**{label}**")
-        for k, v in (detail.get(key) or {}).items():
-            st.caption(f"{k}　**{v:.0f}**" if isinstance(v, (int, float)) else f"{k}　—")
+_MARK = {"green": "🟢", "grey": "⚪️", "orange": "🟠", "red": "🔴"}
+
+for key, label in LAYER_LABELS.items():
+    parts = detail.get(key) or {}
+    if not parts:
+        continue
+    name, meaning = E.LAYER_MEANING[key]
+    v = row.get(key)
+    with st.expander(
+            f"{label}　{v:.0f} 点（{E.verdict(v)[0]}）　—　{meaning}",
+            expanded=(key in ("capacity", "valuation"))):
+        for k, sc in parts.items():
+            d = E.describe(k, sc, raw)
+            c1, c2, c3 = st.columns([2.1, 1.1, 3.4])
+            with c1:
+                st.markdown(f"**{d['名前']}**")
+                st.caption(d["何を測るか"])
+            with c2:
+                st.markdown(f"### {d['実数']}")
+                st.caption("実際の数字")
+            with c3:
+                st.markdown(f"{_MARK[d['色']]} **{sc:.0f} 点** — {d['評価']}"
+                            if pd.notna(sc) else "— 点")
+                st.progress(float(min(max(sc, 0), 100)) / 100 if pd.notna(sc) else 0.0)
+                st.caption(d["目安"])
+            st.markdown("")
 
 traps_found = detail.get("traps") or []
 for t in traps_found:

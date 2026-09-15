@@ -19,10 +19,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from modules import market, review as R
+from modules import market, review as R, sell_rules as SR
 from modules.allocator import allocate, buy_gate, buy_priority, month_gaps, rebalance_funds
 from modules.format import to_pct, yen, yen_short
-from modules.portfolio import dividend_calendar, review_candidates, sector_exposure
+from modules.portfolio import dividend_calendar, sector_exposure
 from modules.store import connect, read_df
 from modules.ui import get_config, get_positions, get_scores, no_data_guard
 
@@ -34,8 +34,6 @@ if no_data_guard(scores):
     st.stop()
 
 positions = get_positions(config)
-raw_review = review_candidates(positions, config)
-review = R.sell_priority(R.attach(raw_review), config) if not raw_review.empty else raw_review
 calendar = dividend_calendar(positions)
 gaps = month_gaps(positions, calendar)
 total_eval = positions["eval_value"].sum() if not positions.empty else 0.0
@@ -53,6 +51,27 @@ def _market() -> dict:
 
 snap = _market()
 regime_name, deploy_ratio, regime_note = market.regime(snap, config)
+
+def _record_sell(account: str, ticker: str, name: str, shares: float,
+                 price: float, when) -> None:
+    """売却を記録して、保有の株数をその場で減らす。全部売れば保有から消す。"""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO transactions (date, account, ticker, name, type, shares, price, "
+            "fee, memo) VALUES (?, ?, ?, ?, 'sell', ?, ?, 0, ?)",
+            (when.isoformat(), account, ticker, name, float(shares), float(price),
+             "整理タブから記録"))
+        cur = conn.execute("SELECT shares FROM holdings WHERE account=? AND ticker=?",
+                           (account, ticker)).fetchone()
+        left = (float(cur["shares"]) if cur else 0.0) - float(shares)
+        if left <= 0.5:
+            conn.execute("DELETE FROM holdings WHERE account=? AND ticker=?", (account, ticker))
+            conn.execute("DELETE FROM holding_review WHERE account=? AND ticker=?",
+                         (account, ticker))
+        else:
+            conn.execute("UPDATE holdings SET shares=?, updated_at=datetime('now') "
+                         "WHERE account=? AND ticker=?", (left, account, ticker))
+
 
 tab_market, tab_buy, tab_sell = st.tabs(["📉 相場と現金", "🛒 買う", "🧹 整理する（売る）"])
 
@@ -144,11 +163,18 @@ with tab_buy:
     with c3:
         min_yield = st.number_input("最低利回り（%）", 0.0, 8.0, 3.0, 0.25) / 100
         per_cap = st.slider("1銘柄あたりの上限（投入額に対する比率）", 5, 100, 15, 5,
-                            format="%d%%") / 100
+                            format="%d%%",
+                            help="日本株は100株単位。1単元が10万〜70万円なので、"
+                                 "上限を低くすると単元が上限を超える銘柄が全部落ちます。"
+                                 "下の「1単元だけは上限を超えて買う」でその余りを配ります") / 100
     with c4:
         scope = st.radio("対象", ["未保有のみ", "保有の買い増しも含む"], index=1)
         require_target = st.checkbox("目標利回りに届いている銘柄だけ", value=False,
                                      help="届いていないなら待つ、というヘムの型")
+        single_lot = st.checkbox("1単元だけは上限を超えて買う", value=True,
+                                 help="これを外すと、単元の値段が1銘柄あたりの上限を超える銘柄は"
+                                      "すべて落ちます（実測で投入枠30万円のうち9.9万円しか"
+                                      "配れませんでした）")
 
     cash = cash_in * (deploy_ratio if use_regime else 1.0)
     if use_regime and deploy_ratio < 1.0:
@@ -177,7 +203,7 @@ with tab_buy:
 
     plan = allocate(cash, cand, positions, config, max_names=int(max_names),
                     per_name_cap_pct=float(per_cap), require_below_target=require_target,
-                    month_gap=gaps)
+                    month_gap=gaps, allow_single_lot=single_lot)
 
     st.divider()
     if plan.empty:
@@ -186,15 +212,47 @@ with tab_buy:
         tax = config["portfolio"]["tax_rate_nisa"] if account == "nisa" \
             else config["portfolio"]["tax_rate_specific"]
         total_in, total_div = plan["投入額"].sum(), plan["年間配当"].sum()
+        reserve_part = cash_in - cash          # 相場の水準に応じて意図的に残したぶん
+        leftover = cash - total_in             # 単元に丸めきれず余ったぶん
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("投入額", yen(total_in))
         c2.metric("増える年間配当（税引前）", yen(total_div))
         c3.metric("増える年間配当（税引後）", yen(total_div * (1 - tax)))
-        c4.metric("現金に積む", yen(cash_in - total_in))
+        c4.metric("残る現金", yen(cash_in - total_in),
+                  help="暴落用に取っておくぶんと、単元に丸めて余ったぶんの合計")
+
+        # 内訳を必ず出す。合計だけ出していたときは「入金50万・投入枠30万」と
+        # 言いながら「現金に積む 40万」と表示され、何が起きているか分からなかった。
+        st.caption(
+            f"**入金 {yen(cash_in)}**　＝　投入 {yen(total_in)}　＋　"
+            f"暴落用に取っておく {yen(reserve_part)}（【{regime_name}】のため入金の "
+            f"{1 - deploy_ratio:.0%}）　＋　単元に丸めて余った {yen(leftover)}"
+            if use_regime and deploy_ratio < 1.0 else
+            f"**入金 {yen(cash_in)}**　＝　投入 {yen(total_in)}　＋　"
+            f"単元（100株）に丸めて余った {yen(leftover)}")
+        if leftover > 0:
+            cheapest = (cand["last_close"].min() * 100) if not cand.empty else 0
+            st.caption(
+                f"余った {yen(leftover)} は、**100株単位で買えるものが無くなった**ぶんです"
+                f"（いちばん安い候補でも1単元 {yen(cheapest)}）。"
+                + ("銘柄数の上限を上げるか、1銘柄あたりの上限をゆるめると配り切れます。"
+                   if len(plan) >= int(max_names) or not single_lot else
+                   "次の入金に足すか、暴落用の現金に回してください。"))
+        n_relaxed = int(plan.get("上限を超えて1単元", pd.Series(dtype=bool)).sum())
+        if n_relaxed:
+            st.caption(f"うち **{n_relaxed} 銘柄**は、1単元の値段が上限を超えていますが"
+                       "「1単元だけは上限を超えて買う」に従って入れています。")
+        n_sec = plan["業種"].nunique()
+        if n_sec < max(3, len(plan) // 2):
+            top_sec = plan.groupby("業種")["投入額"].sum().idxmax()
+            st.warning(f"今回の配分は **{n_sec} 業種**に偏っています（最大は {top_sec}）。"
+                       "業種の上限はポートフォリオ全体に対してかかるので、"
+                       "1回の入金では効きません。気になるなら銘柄数の上限を上げてください。")
 
         show = plan[["コード", "銘柄名", "業種", "配当月", "株価", "株数", "投入額", "利回り",
                      "年間配当", "買い付け優先度", "割安度", "自己利回り順位", "絶対利回り順位",
-                     "継続", "補完度", "発掘スコア"]].copy()
+                     "継続", "補完度", "発掘スコア", "上限を超えて1単元"]].copy()
+        show = show.rename(columns={"上限を超えて1単元": "上限超"})
         show["利回り"] = to_pct(show["利回り"])
         show["税引後配当"] = (show["年間配当"] * (1 - tax)).round(0)
         for c in ("買い付け優先度", "割安度", "自己利回り順位", "絶対利回り順位",
@@ -216,6 +274,9 @@ with tab_buy:
                 format="%.0f", help="空いている業種・空いている配当月を埋めるか（±10%のタイブレーク）"),
             "発掘スコア": st.column_config.NumberColumn(
                 format="%.0f", help="参考表示。買う順位の決定には使っていません"),
+            "上限超": st.column_config.CheckboxColumn(
+                help="1単元の値段が「1銘柄あたりの上限」を超えているが、"
+                     "1単元だけ入れた銘柄"),
         })
         st.caption("株数は単元（100株）に丸めています。**買い付け優先度の順に**、"
                    "業種の上限と1銘柄あたりの上限を守りながら埋めています。")
@@ -312,161 +373,211 @@ with tab_buy:
 
 # ═══════════════════════════════════════════════ 整理する
 with tab_sell:
-    if review.empty:
-        st.success("整理を検討すべき保有はありません")
-    else:
-        undecided = review[review["判断"] == ""]
-        n_big = int((review["重さ"] == "重大").sum())
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("🔴 配当が危ない", n_big)
-        c2.metric("🟡 額が小さいだけ", int((review["重さ"] == "軽微").sum()))
-        c3.metric("未判断", len(undecided), help="まだ「持ち続ける／様子見」を決めていないもの")
-        c4.metric("判断済み", len(review) - len(undecided))
+    ev = SR.evaluate(positions, config)
+    ev = R.attach(ev) if not ev.empty else ev
+    counts = SR.summary(ev)
 
-        st.caption("**整理の優先度**は「配当の危なさ50% + 保有額の大きさ30% + 含み損の大きさ20%」。"
-                   "含み損の銘柄を先に売れば、特定口座では譲渡益と相殺できて税金が軽くなります。"
-                   "判断を記録すると、次からは既定では隠れます。")
+    st.markdown("#### いま何が起きているか")
+    cs = st.columns(5)
+    _HELP = {
+        "売却を検討": "配当そのものが壊れた。減配が実際に起きた／利益を超えて配当している等、**事実**にだけ反応します",
+        "監視を強める": "配当はまだ出ているが、原資が傷んでいる。次の決算で確かめるもの",
+        "利確を検討": "壊れたのではなく育ちきった。ヘムの「上がりすぎたら売る」",
+        "手入れ": "売る理由ではありません。額が小さい・口座が分かれているなどの片付け",
+        "判定待ち": "財務や配当性向がまだ取れていないもの。判定していません",
+    }
+    for col, k in zip(cs, SR.SEVERITY_ORDER):
+        col.metric(f"{SR.SEVERITY[k][0]} {k}", counts[k], help=_HELP[k])
 
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            pick_sev = st.multiselect("重さ", ["重大", "軽微"], default=["重大"])
-        with c2:
-            hide_decided = st.checkbox("判断済みを隠す", value=True)
+    with st.expander("なぜこの基準なのか（買う基準をそのまま使わない理由）"):
+        st.markdown("""
+**買わない理由と、売る理由は別物です。**
 
-        shown = review[review["重さ"].isin(pick_sev)] if pick_sev else review
-        if hide_decided:
-            shown = shown[shown["判断"] == ""]
+買うときは選択肢が3,700あるので、少しでも引っかかれば見送ってよい。
+けれど持っている株を売るのは、**税金・スプレッド・再投資先の確保**という
+コストを払う行為です。同じ基準を当てると、こうなります。
 
-        if shown.empty:
-            st.success("この条件に該当する未判断の保有はありません。"
-                       "「判断済みを隠す」を外すと、決めたものも見られます。")
-        else:
-            tax_rate = config["portfolio"]["tax_rate_specific"]
-            gain = (shown["last_close"] - shown["avg_cost"].fillna(0)) * shown["shares"]
-            tax_est = np.where(shown["account"] == "nisa", 0.0,
-                               np.maximum(gain, 0) * tax_rate)
-            view = pd.DataFrame({
-                "整理の優先度": shown["整理の優先度"].values,
-                "重さ": shown["重さ"].values,
-                "コード": shown["code"].values,
-                "銘柄名": shown["name"].values,
-                "業種": shown["sector33"].values,
-                "口座": shown["account"].map({"specific": "特定", "nisa": "NISA"}).values,
-                "株数": shown["shares"].values,
-                "株価": shown["last_close"].values,
-                "評価額": shown["eval_value"].values,
-                "損益率": to_pct(shown["pnl_pct"]).values,
-                "売却益の税金": np.round(tax_est, 0),
-                "配当継続": shown["health"].round(0).values,
-                "理由": shown["整理を検討する理由"].values,
-                "判断": shown["判断"].values,
-            })
-            st.dataframe(view, hide_index=True, width="stretch", height=340, column_config={
-                "整理の優先度": st.column_config.ProgressColumn(
-                    format="%.0f", min_value=0, max_value=100),
-                "株価": st.column_config.NumberColumn(format="¥%d"),
-                "評価額": st.column_config.NumberColumn(format="¥%d"),
-                "損益率": st.column_config.NumberColumn(format="%.1f%%"),
-                "売却益の税金": st.column_config.NumberColumn(
-                    format="¥%d", help="いま売った場合にかかる税金の見込み。NISAは非課税"),
-                "配当継続": st.column_config.NumberColumn(format="%.0f"),
-                "理由": st.column_config.TextColumn(width="large"),
-            })
+以前はここに **保有114銘柄のうち84銘柄** が「重大」として並んでいました。中身は：
 
-            st.markdown("#### 決めたことを記録する")
-            st.caption("「持ち続ける」「様子見」にすると次から隠れます。"
-                       "「売った」は株数と約定単価を入れて記録すると保有から減ります。")
-            editor = st.data_editor(
-                pd.DataFrame({
-                    "判断": [""] * len(shown),
-                    "コード": shown["code"].values,
-                    "銘柄名": shown["name"].values,
-                    "口座": shown["account"].map({"specific": "特定", "nisa": "NISA"}).values,
-                    "株数": shown["shares"].values,
-                    "約定単価": shown["last_close"].round(1).values,
-                }),
-                hide_index=True, width="stretch", key="sell_editor", height=300,
-                column_config={
-                    "判断": st.column_config.SelectboxColumn(
-                        options=["", "持ち続ける", "様子見", "売った"], required=False),
-                    "コード": st.column_config.TextColumn(disabled=True),
-                    "銘柄名": st.column_config.TextColumn(disabled=True),
-                    "口座": st.column_config.TextColumn(disabled=True),
-                    "株数": st.column_config.NumberColumn(min_value=0, step=100),
-                    "約定単価": st.column_config.NumberColumn(format="¥%.1f", min_value=0.0)})
-            sell_date = st.date_input("約定日（売った場合）", value=date.today(), key="sell_date")
+| 出ていたもの | 実際は |
+|---|---|
+| 三菱UFJ・群馬銀行「営業CFがマイナス」 | **銀行は貸出を増やすと営業CFがマイナスになる**。正常 |
+| トヨタ「FCFで配当を賄えていない」 | 金融事業込みのFCF。売り理由ではない |
+| MS&AD「配当性向が計算できない」 | 単なる**データ欠損**。連続増配17年 |
+| 黒田グループ「上場5年未満」 | 新規上場は売り理由ではない |
+| イントラスト「売買代金が薄い」 | 流動性は**買う前に確かめること** |
 
-            sold = editor[editor["判断"] == "売った"]
-            if not sold.empty:
-                st.info(f"**{len(sold)} 銘柄・{yen((sold['株数'] * sold['約定単価']).sum())}** "
-                        "を売却として記録します")
-            if st.button("この内容で記録する", type="primary"):
-                acted = editor[editor["判断"] != ""]
-                if acted.empty:
-                    st.warning("判断が選ばれている行がありません")
-                else:
-                    n_keep = n_sold = 0
-                    proceeds = 0.0
-                    with connect() as conn:
-                        for r in acted.itertuples(index=False):
-                            ticker = f"{r.コード}.T"
-                            acc = "nisa" if r.口座 == "NISA" else "specific"
-                            if r.判断 in ("持ち続ける", "様子見"):
-                                R.save(acc, ticker,
-                                       "keep" if r.判断 == "持ち続ける" else "watch")
-                                n_keep += 1
-                                continue
-                            shares, price = float(r.株数), float(r.約定単価)
-                            if shares <= 0:
-                                continue
-                            conn.execute(
-                                "INSERT INTO transactions (date, account, ticker, name, type, "
-                                "shares, price, fee, memo) VALUES (?, ?, ?, ?, 'sell', ?, ?, 0, ?)",
-                                (sell_date.isoformat(), acc, ticker, r.銘柄名, shares, price,
-                                 "整理タブから記録"))
-                            cur = conn.execute(
-                                "SELECT shares FROM holdings WHERE account=? AND ticker=?",
-                                (acc, ticker)).fetchone()
-                            left = (float(cur["shares"]) if cur else 0.0) - shares
-                            if left <= 0.5:
-                                conn.execute("DELETE FROM holdings WHERE account=? AND ticker=?",
-                                             (acc, ticker))
-                                conn.execute("DELETE FROM holding_review WHERE account=? AND ticker=?",
-                                             (acc, ticker))
-                            else:
-                                conn.execute("UPDATE holdings SET shares=?, "
-                                             "updated_at=datetime('now') WHERE account=? AND ticker=?",
-                                             (left, acc, ticker))
-                            n_sold += 1
-                            proceeds += shares * price
-                    msg = []
-                    if n_keep:
-                        msg.append(f"{n_keep} 銘柄の判断を記録しました（次から隠れます）")
-                    if n_sold:
-                        msg.append(f"{n_sold} 銘柄の売却を記録しました。売却代金 {yen(proceeds)}")
-                    st.success("／".join(msg))
-                    st.cache_data.clear()
+いまは **起きた事実にだけ反応**します。
 
-        with st.expander("判断を取り消す"):
-            dec = R.load()
-            if dec.empty:
-                st.caption("記録された判断はまだありません")
-            else:
-                names = read_df("SELECT ticker, name FROM universe").set_index("ticker")["name"]
-                dec["銘柄名"] = dec["ticker"].map(names)
-                dec["判断"] = dec["decision"].map(R.DECISIONS)
-                st.dataframe(dec[["account", "ticker", "銘柄名", "判断", "decided_at"]].rename(
-                    columns={"account": "口座", "ticker": "銘柄", "decided_at": "判断日"}),
-                    hide_index=True, width="stretch")
-                undo = st.selectbox("取り消す銘柄", [""] + [
-                    f"{r.account}／{r.ticker} {r.銘柄名}" for r in dec.itertuples(index=False)])
-                if undo and st.button("この判断を取り消す"):
-                    acc, rest = undo.split("／")
-                    R.clear(acc, rest.split(" ")[0])
-                    st.success("取り消しました")
-                    st.cache_data.clear()
+- 🔴 **売却を検討** … 実際に減配した／10年で3回以上減配している／利益を超えて配当している
+- 🟡 **監視を強める** … 営業CFが2期連続マイナス／2期連続赤字／減益が続き配当性向も高い／借金が重く自己資本が薄い／配当が3年すえ置きで性向が高い
+- 🟢 **利確を検討** … 自己利回り順位が15%以下（この会社としては歴史的に高い株価）で含み益30%超／PER15倍超で利回りが目標の6割を下回った
+- ⚪️ **手入れ** … 額が小さい・口座が分かれている。**売る理由ではありません**
+
+**金融（銀行・保険・証券）には、営業CF・FCF・有利子負債の基準を当てていません。**
+業態として営業CFがマイナスになるのが普通だからです。
+また、上場年数・売買代金・時価総額は新規買いの条件であって、売り理由にはしていません。
+""")
 
     st.divider()
+    c1, c2, c3 = st.columns([1.6, 1, 1])
+    with c1:
+        pick_sev = st.multiselect(
+            "見るもの", SR.SEVERITY_ORDER,
+            default=[k for k in ("売却を検討", "監視を強める", "利確を検討") if counts[k]],
+            format_func=lambda k: f"{SR.SEVERITY[k][0]} {k}（{counts[k]}）")
+    with c2:
+        hide_decided = st.checkbox("判断済みを隠す", value=True,
+                                   help="「持ち続ける」「様子見」と決めたものを隠します")
+    with c3:
+        view_mode = st.radio("表示", ["1銘柄ずつ", "一覧"], horizontal=True,
+                             help="1銘柄ずつなら理由が全部読めます")
+
+    shown = ev[ev["重さ"].isin(pick_sev)] if pick_sev else ev
+    if hide_decided:
+        shown = shown[shown["判断"] == ""]
+    shown = shown.reset_index(drop=True)
+
+    tax_rate = config["portfolio"]["tax_rate_specific"]
+
+    def _tax(row, shares, price) -> float:
+        if row["account"] == "nisa":
+            return 0.0
+        gain = (price - float(row["avg_cost"] or 0)) * shares
+        return max(gain, 0.0) * tax_rate
+
+    # ────────────────────────────── 1銘柄ずつ
+    if shown.empty:
+        st.success("この条件に該当する、まだ判断していない保有はありません。")
+    elif view_mode == "1銘柄ずつ":
+        st.caption(f"**{len(shown)} 件**あります。1件ずつ決めると、次からは隠れます。")
+        i = st.number_input("何件目", 1, len(shown), 1, 1,
+                            key="sell_cursor") - 1
+        r = shown.iloc[int(i)]
+        st.progress((int(i) + 1) / len(shown), f"{int(i) + 1} / {len(shown)} 件目")
+
+        acc_ja = "NISA" if r["account"] == "nisa" else "特定"
+        st.markdown(f"### {SR.SEVERITY[r['重さ']][0]} {r['code']}　{r['name']}")
+        st.caption(f"{r['sector33']}　／　{acc_ja}口座　／　"
+                   f"整理の優先度 {r['整理の優先度']:.0f}")
+
+        m = st.columns(5)
+        m[0].metric("株数", f"{r['shares']:,.0f} 株")
+        m[1].metric("株価", yen(r["last_close"]))
+        m[2].metric("評価額", yen(r["eval_value"]))
+        m[3].metric("損益", f"{r['pnl_pct']:+.1%}" if pd.notna(r["pnl_pct"]) else "—",
+                    yen((r["last_close"] - (r["avg_cost"] or 0)) * r["shares"]))
+        m[4].metric("配当継続スコア",
+                    f"{r['health']:.0f}" if pd.notna(r["health"]) else "—",
+                    help="配当が続くか・増えるかだけを見た点数。50が真ん中")
+
+        box = {"売却を検討": st.error, "監視を強める": st.warning,
+               "利確を検討": st.success, "手入れ": st.info,
+               "判定待ち": st.info}[r["重さ"]]
+        box(f"**{r['重さ']}**\n\n{r['理由']}")
+        st.markdown("**根拠になっている数字**")
+        st.code(r["根拠"], language=None)
+        st.markdown("**どうするか**")
+        st.markdown(r["やること"])
+        if r["判断"]:
+            st.caption(f"→ すでに「{r['判断']}」と記録しています（{r['判断日']}）")
+
+        st.markdown("#### この銘柄をどうするか")
+        st.caption("「売った」を選んで記録すると、**ポートフォリオの株数がその場で減ります**"
+                   "（全部売れば保有から消えます）。買い足したときは 🛒 買う で記録してください。")
+        d1, d2, d3, d4 = st.columns([1.2, 1, 1, 1])
+        with d1:
+            act = st.radio("判断", ["まだ決めない", "持ち続ける", "様子見", "売った"],
+                           key=f"act_{r['account']}_{r['ticker']}", horizontal=False)
+        with d2:
+            sh = st.number_input("売った株数", 0.0, float(r["shares"]),
+                                 float(r["shares"]), 100.0,
+                                 key=f"sh_{r['account']}_{r['ticker']}")
+        with d3:
+            pr = st.number_input("約定単価（円）", 0.0, 10_000_000.0,
+                                 float(r["last_close"] or 0), 0.5,
+                                 key=f"pr_{r['account']}_{r['ticker']}")
+        with d4:
+            sd = st.date_input("約定日", value=date.today(),
+                               key=f"sd_{r['account']}_{r['ticker']}")
+
+        if act == "売った" and sh > 0:
+            tax = _tax(r, sh, pr)
+            e1, e2, e3 = st.columns(3)
+            e1.metric("売却代金", yen(sh * pr))
+            e2.metric("売却益の税金", yen(tax),
+                      help="特定口座 20.315%。含み損なら0円。NISAは非課税")
+            e3.metric("手取り", yen(sh * pr - tax))
+            lost = sh * (r.get("dps_latest") or 0)
+            if lost:
+                st.caption(f"この売却で**年間 {yen(lost)} の配当がなくなります**。"
+                           "同じ配当を取り戻すには、🛒 買う で入れ直す必要があります。")
+
+        if st.button("この判断を記録する", type="primary", key=f"go_{r['account']}_{r['ticker']}"):
+            if act == "まだ決めない":
+                st.warning("判断が選ばれていません")
+            elif act in ("持ち続ける", "様子見"):
+                R.save(r["account"], r["ticker"], "keep" if act == "持ち続ける" else "watch")
+                st.success(f"{r['name']} を「{act}」として記録しました。次から隠れます。")
+                st.cache_data.clear()
+                st.rerun()
+            elif sh <= 0:
+                st.warning("売った株数を入れてください")
+            else:
+                _record_sell(r["account"], r["ticker"], r["name"], sh, pr, sd)
+                st.success(f"{r['name']} を {sh:,.0f} 株 {yen(sh * pr)} で売却として記録しました。"
+                           "ポートフォリオに反映されています。")
+                st.cache_data.clear()
+                st.rerun()
+
+    # ────────────────────────────── 一覧
+    else:
+        st.caption("理由の全文は「1銘柄ずつ」で読めます。ここは見渡すためのものです。")
+        v = pd.DataFrame({
+            "": shown["印"].values,
+            "重さ": shown["重さ"].values,
+            "優先度": shown["整理の優先度"].values,
+            "コード": shown["code"].values,
+            "銘柄名": shown["name"].values,
+            "業種": shown["sector33"].values,
+            "口座": shown["account"].map({"specific": "特定", "nisa": "NISA"}).values,
+            "評価額": shown["eval_value"].values,
+            "損益率": to_pct(shown["pnl_pct"]).values,
+            "配当継続": shown["health"].round(0).values,
+            "理由": shown["理由"].str.replace("\n", " ／ ").str.lstrip("・").values,
+            "判断": shown["判断"].values,
+        })
+        st.dataframe(v, hide_index=True, width="stretch", height=520, column_config={
+            "優先度": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
+            "評価額": st.column_config.NumberColumn(format="¥%d"),
+            "損益率": st.column_config.NumberColumn(format="%.1f%%"),
+            "配当継続": st.column_config.NumberColumn(format="%.0f"),
+            "理由": st.column_config.TextColumn(width="large"),
+        })
+        st.download_button("この一覧をCSVで保存", v.to_csv(index=False).encode("utf-8-sig"),
+                           f"整理候補_{date.today():%Y%m%d}.csv", "text/csv")
+
+    st.divider()
+    with st.expander("記録した判断を取り消す"):
+        dec = R.load()
+        if dec.empty:
+            st.caption("記録された判断はまだありません")
+        else:
+            names = read_df("SELECT ticker, name FROM universe").set_index("ticker")["name"]
+            dec["銘柄名"] = dec["ticker"].map(names)
+            dec["判断"] = dec["decision"].map(R.DECISIONS)
+            st.dataframe(dec[["account", "ticker", "銘柄名", "判断", "decided_at"]].rename(
+                columns={"account": "口座", "ticker": "銘柄", "decided_at": "判断日"}),
+                hide_index=True, width="stretch")
+            undo = st.selectbox("取り消す銘柄", [""] + [
+                f"{r.account}／{r.ticker} {r.銘柄名}" for r in dec.itertuples(index=False)])
+            if undo and st.button("この判断を取り消す"):
+                acc, rest = undo.split("／")
+                R.clear(acc, rest.split(" ")[0])
+                st.success("取り消しました")
+                st.cache_data.clear()
+                st.rerun()
+
     with st.expander("売買の記録"):
         tx = read_df("SELECT date, account, ticker, name, type, shares, price, memo "
                      "FROM transactions ORDER BY date DESC, id DESC LIMIT 200")
