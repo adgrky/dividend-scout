@@ -143,17 +143,23 @@ def freshness_banner(sidebar: bool = True) -> None:
     a = data_asof()
     if not a:
         return
+    where0 = st.sidebar if sidebar else st
+    # 更新スクリプトを走らせてもアプリ側は最大10分キャッシュを持つ。
+    # 手で入れ替えられるようにしておかないと「更新したのに数字が変わらない」になる。
+    if where0.button("🔄 読み込み直す", width="stretch",
+                     help="データを更新したあとに押すと、新しい数字に入れ替わります"):
+        st.cache_data.clear()
+        st.rerun()
     days = a.get("_古さ", 0)
     where = st.sidebar if sidebar else st
     detail = "　／　".join(f"{k} {v:%m/%d}" for k, v in a.items() if not k.startswith("_"))
     if days >= _VERY_STALE_DAYS:
         where.error(f"⚠️ **データが {days} 日前のものです**\n\n{detail}\n\n"
-                    "この数字で売買を決めないでください。")
-        where.code("uv run python scripts/weekly_scan.py", language="bash")
+                    "この数字で売買を決めないでください。\n\n"
+                    "**更新.command をダブルクリック**してください（約10分）。")
     elif days >= _STALE_DAYS:
         where.warning(f"データは **{days} 日前**（{a['_最古']:%Y-%m-%d}）\n\n{detail}\n\n"
-                      "そろそろ更新どきです。")
-        where.code("uv run python scripts/weekly_scan.py", language="bash")
+                      "そろそろ更新どきです。**更新.command をダブルクリック**（約10分）。")
     else:
         where.caption(f"📅 データは **{a['_最古']:%Y-%m-%d}** 時点"
                       + ("（今日）" if days == 0 else f"（{days}日前）")
