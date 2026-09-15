@@ -39,20 +39,25 @@ gate:
   min_dividend_years: 5            # 配当実績が5年未満は判定不能として除外
 
 # ---- スコア重み ----
-# 初期値はすべて等ウェイト。scripts/validate_score.py の検証を通った層だけ
-# 重みを上げる。直感で動かさない。
+# 2026-09-15 の検証（4コホート・延べ9,220銘柄）とヘムの手法を踏まえて設定。
+# 検証結果は docs/validation_report_2026-09-15.txt。
 weights:
-  capacity: 1.0      # A 増配余力
-  willingness: 1.0   # B 増配意思
-  growth: 1.0        # C 原資成長
-  neglect: 1.0       # D 見過ごされ度
-  valuation: 1.0     # E 割安
+  capacity: 1.5      # A 増配余力  ヘムの選定基準の1番目。割安と組んで初めて意味を持つ
+  willingness: 0.5   # B 増配意思  検証で加点としては効かなかった（連続増配上位30社は
+                     #             全体平均に負けた）。減配歴はゲート側で効かせている
+  growth: 1.0        # C 原資成長  検証不能のため据え置き
+  neglect: 1.2       # D 見過ごされ度  弱いが単調（+32%→+46%）。ヘムが優位性と明言する領域
+  valuation: 1.5     # E 割安  検証で唯一きれいに単調（+15%→+65%）。ヘムの2番目
   trap_penalty: 1.0  # F 減点の効き具合
 
 scoring:
   payout_ideal_low: 0.30      # 配当性向のスイートスポット
   payout_ideal_high: 0.50
   payout_too_low: 0.15        # これ未満は還元意思なしとして減点
+  # ヘムの中核ルール「配当性向 < 配当利回り × 10」を連続値にしたもの。
+  # 配当利回り×10 ÷ 配当性向 が 1.0 を超えるとヘム基準を満たす（PER<10 と同値）。
+  # ゲートにすると 402 → 53 銘柄まで落ちて情報を捨てるので、加点指標として使う。
+  hem_ratio_threshold: 1.0
   yield_percentile_window_years: 7
   dps_cagr_years: [5, 10]
 

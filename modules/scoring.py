@@ -138,6 +138,9 @@ def score_capacity(df: pd.DataFrame, config: dict) -> tuple[pd.Series, dict]:
     parts = {
         "配当性向の位置": payout_curve(df["payout_ratio"], s["payout_ideal_low"],
                                   s["payout_ideal_high"], s["payout_too_low"]),
+        # ヘムの「配当性向 < 配当利回り×10」を連続値にしたもの。高利回りと
+        # 低配当性向を同時に要求するので、割安さと増配余力が分離されない。
+        "ヘム指数（利回り×10÷配当性向）": pct_rank(df.get("hem_ratio")),
         "FCF配当カバー率": pct_rank(df["fcf_cover"]),
         "ネットキャッシュ比率": pct_rank(df["net_cash_ratio"]),
         "有利子負債の軽さ": pct_rank(df["net_debt_to_ocf"], ascending=False),
@@ -248,7 +251,8 @@ def compute_scores(df: pd.DataFrame, config: dict, trap_penalty: pd.Series | Non
     return out
 
 
-_RAW_KEYS = ["dividend_yield", "yield_percentile", "dps_latest", "streak", "streak_no_cut",
+_RAW_KEYS = ["dividend_yield", "yield_percentile", "dps_latest", "hem_ratio",
+             "streak", "streak_no_cut",
              "cuts_10y", "cagr_5y", "cagr_10y", "payout_ratio", "fcf_cover",
              "net_cash_ratio", "net_debt_to_ocf", "equity_ratio", "roe", "per", "pbr",
              "market_cap_oku", "avg_turnover_man", "ni_cagr", "ocf_cagr", "pos_52w"]

@@ -123,6 +123,11 @@ def attach_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
     net_debt = (-out["net_cash"]).clip(lower=0)
     out["net_debt_to_ocf"] = _safe_div(net_debt, out["operating_cf"]).fillna(0.0).values
     out["operating_margin"] = _safe_div(out["operating_income"], out["revenue"]).values
+    # ヘム指数 = 配当利回り × 10 ÷ 配当性向。1.0 超で「配当性向 < 利回り×10」を満たす。
+    # 高利回りと低配当性向を同時に要求する一本の式で、PER < 10 と数学的に同値。
+    # 利回り単独で買うと配当が育たない（検証: DPS 5年 -3.8%）のは、配当性向の高い
+    # 銘柄が混ざるため。この指数はその2つを分離せずに評価する。
+    out["hem_ratio"] = _safe_div(out["dividend_yield"] * 10, out["payout_ratio"]).values
 
     # 赤字・営業CFマイナスは配当性向が負になって「性向が低い＝優秀」と誤読される。
     # 負の値は判定不能として落とす（ゲートで別途落ちる）。

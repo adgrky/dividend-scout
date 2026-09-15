@@ -75,8 +75,11 @@ for col, (key, label) in zip(cols, LAYER_LABELS.items()):
             st.caption(f"{k}　**{v:.0f}**" if isinstance(v, (int, float)) else f"{k}　—")
 
 st.markdown("**根拠になっている実数**")
+hem = raw.get("hem_ratio")
 facts = pd.DataFrame([
     ("配当性向", pct(raw.get("payout_ratio"))),
+    ("ヘム指数（利回り×10÷配当性向）",
+     f"{hem:.2f}{'　✓ 基準を満たす' if hem and hem >= 1.0 else ''}" if hem else "—"),
     ("FCF配当カバー率", f"{raw.get('fcf_cover'):.1f} 倍" if raw.get("fcf_cover") else "—"),
     ("ネットキャッシュ比率", pct(raw.get("net_cash_ratio"))),
     ("ネット有利子負債 ÷ 営業CF", f"{raw.get('net_debt_to_ocf'):.1f} 年" if raw.get("net_debt_to_ocf") is not None else "—"),
