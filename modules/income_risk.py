@@ -23,6 +23,7 @@ from __future__ import annotations
 import pandas as pd
 
 from modules.dividend_history import annual_dps
+from modules.config import load_config
 from modules.store import read_df
 
 # 実際に起きた不況。(名前, 平時の年, 傷んだ年の範囲, 説明)
@@ -199,3 +200,35 @@ def income_by_sector(pos: pd.DataFrame) -> pd.DataFrame:
     g["配当の構成比"] = g["年間配当"] / tot_d if tot_d else 0
     g["差"] = g["配当の構成比"] - g["評価額の構成比"]
     return g.sort_values("配当の構成比", ascending=False)
+
+
+def cyclical_exposure(pos: pd.DataFrame, config: dict | None = None) -> dict:
+    """不況に弱い業種が、年間配当の何割を占めているか。
+
+    **評価額ではなく配当で見る。** 高利回りの景気敏感株は、評価額に占める割合より
+    配当に占める割合のほうが大きくなる。守りたいのはインカムなので、そちらで測る。
+
+    どの業種が「弱い」かは config の cyclical.sectors。リーマンの実績だけで選び、
+    コロナで答え合わせ済み（詳細は config.yaml のコメント）。
+    """
+    config = config or load_config()
+    secs = set(config.get("cyclical", {}).get("sectors", []))
+    cap = float(config.get("cyclical", {}).get("max_income_share", 0.25))
+    if pos is None or pos.empty or not secs:
+        return {}
+    weak = pos["sector33"].isin(secs)
+    inc = float(pos["annual_dividend"].sum()) or 1.0
+    val = float(pos["eval_value"].sum()) or 1.0
+    share = float(pos.loc[weak, "annual_dividend"].sum()) / inc
+    detail = (pos[weak].groupby("sector33")["annual_dividend"].sum()
+              .sort_values(ascending=False) / inc)
+    return {
+        "対象業種": sorted(secs),
+        "銘柄数": int(weak.sum()),
+        "評価額に占める割合": float(pos.loc[weak, "eval_value"].sum()) / val,
+        "配当に占める割合": share,
+        "上限": cap,
+        "超過": max(0.0, share - cap),
+        "超過している配当額": max(0.0, share - cap) * inc,
+        "業種別": detail,
+    }
