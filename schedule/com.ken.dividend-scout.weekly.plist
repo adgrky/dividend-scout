@@ -8,14 +8,14 @@
   <key>Label</key><string>com.ken.dividend-scout.weekly</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/ken/Desktop/クロード/dividend-scout/.venv/bin/python</string>
-    <string>/Users/ken/Desktop/クロード/dividend-scout/scripts/weekly_scan.py</string>
+    <string>/Users/ken/dev/dividend-scout/.venv/bin/python</string>
+    <string>/Users/ken/dev/dividend-scout/scripts/weekly_scan.py</string>
   </array>
-  <key>WorkingDirectory</key><string>/Users/ken/Desktop/クロード/dividend-scout</string>
+  <key>WorkingDirectory</key><string>/Users/ken/dev/dividend-scout</string>
   <key>StartCalendarInterval</key>
   <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-  <key>StandardOutPath</key><string>/Users/ken/Desktop/クロード/dividend-scout/logs/weekly.log</string>
-  <key>StandardErrorPath</key><string>/Users/ken/Desktop/クロード/dividend-scout/logs/weekly.log</string>
+  <key>StandardOutPath</key><string>/Users/ken/dev/dividend-scout/logs/weekly.log</string>
+  <key>StandardErrorPath</key><string>/Users/ken/dev/dividend-scout/logs/weekly.log</string>
   <key>RunAtLoad</key><false/>
 </dict>
 </plist>

@@ -7,10 +7,10 @@
   <key>Label</key><string>com.ken.dividend-scout.daily</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/ken/Desktop/クロード/dividend-scout/.venv/bin/python</string>
-    <string>/Users/ken/Desktop/クロード/dividend-scout/scripts/daily_watch.py</string>
+    <string>/Users/ken/dev/dividend-scout/.venv/bin/python</string>
+    <string>/Users/ken/dev/dividend-scout/scripts/daily_watch.py</string>
   </array>
-  <key>WorkingDirectory</key><string>/Users/ken/Desktop/クロード/dividend-scout</string>
+  <key>WorkingDirectory</key><string>/Users/ken/dev/dividend-scout</string>
   <key>EnvironmentVariables</key>
   <dict><key>NTFY_TOPIC</key><string>ここにトピック名を入れる</string></dict>
   <key>StartCalendarInterval</key>
@@ -21,8 +21,8 @@
     <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
     <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
   </array>
-  <key>StandardOutPath</key><string>/Users/ken/Desktop/クロード/dividend-scout/logs/daily.log</string>
-  <key>StandardErrorPath</key><string>/Users/ken/Desktop/クロード/dividend-scout/logs/daily.log</string>
+  <key>StandardOutPath</key><string>/Users/ken/dev/dividend-scout/logs/daily.log</string>
+  <key>StandardErrorPath</key><string>/Users/ken/dev/dividend-scout/logs/daily.log</string>
   <key>RunAtLoad</key><false/>
 </dict>
 </plist>

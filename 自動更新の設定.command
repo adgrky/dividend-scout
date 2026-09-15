@@ -31,6 +31,25 @@ pause_exit() { echo ""; read -n 1 -s -r -p "Enter キーでこの窓を閉じま
 
 [ -d ".venv" ] || { echo "⚠ 環境がまだありません。先に 起動.command を一度実行してください。"; pause_exit 1; }
 
+# 置き場所の確認。macOS は デスクトップ・書類 をバックグラウンドのプログラムから
+# 隔離するので（TCC）、そこに置いたままだと自動更新が毎週黙って失敗する。
+# 実測: デスクトップに置いていたときは LaunchAgent からフォルダ一覧すら読めず、
+# 終了コード78で落ちてログも空のままだった。
+case "$APP_DIR" in
+  "$HOME"/Desktop/*|"$HOME"/Documents/*|"$HOME"/Downloads/*)
+    echo "  ⚠️ このフォルダは **$(basename "$(dirname "$APP_DIR")")** の中にあります。"
+    echo ""
+    echo "     macOS は デスクトップ・書類・ダウンロード を、"
+    echo "     バックグラウンドのプログラムから隔離します（TCC）。"
+    echo "     このまま自動更新をオンにしても、**毎週黙って失敗します**。"
+    echo ""
+    echo "     フォルダごと ~/dev/ に移してから、もう一度ここを実行してください。"
+    echo "     （移したあとは .venv を作り直す必要があります："
+    echo "       cd ~/dev/dividend-scout && uv venv --python 3.11 --clear && uv pip install -r requirements.txt）"
+    pause_exit 1
+    ;;
+esac
+
 if [ -f "$PLIST" ]; then
   echo "  いまの状態: ✅ 自動更新は【オン】"
   NEXT=$(launchctl list 2>/dev/null | grep "$LABEL" || true)
