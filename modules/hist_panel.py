@@ -335,11 +335,13 @@ def build_panel(min_fy: int = 2012) -> pd.DataFrame:
     s["prev_ni"] = g["net_income"].shift(1).where(one)
 
     # 減益の年に配当をどうしたか（増配意思の代理変数のもと）
-    s["is_down_year"] = (s["net_income"] < s["prev_ni"]).where(s["prev_ni"].notna())
-    s["dps_held"] = (s["dps_use"] >= s["prev_dps"] * 0.999).where(
-        s["prev_dps"].notna() & (s["prev_dps"] > 0))
-    s["dps_cut"] = (s["dps_use"] < s["prev_dps"] * 0.999).where(
-        s["prev_dps"].notna() & (s["prev_dps"] > 0))
+    # 「判定できない」を持てる真偽値にしておく。object 型のままだと
+    # fillna(False) のたびに pandas が警告を出し、将来の版で挙動が変わる。
+    s["is_down_year"] = (s["net_income"] < s["prev_ni"]).where(
+        s["prev_ni"].notna()).astype("boolean")
+    known = s["prev_dps"].notna() & (s["prev_dps"] > 0)
+    s["dps_held"] = (s["dps_use"] >= s["prev_dps"] * 0.999).where(known).astype("boolean")
+    s["dps_cut"] = (s["dps_use"] < s["prev_dps"] * 0.999).where(known).astype("boolean")
     return s.drop(columns=["gap"])
 
 

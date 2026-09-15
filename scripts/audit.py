@@ -491,8 +491,13 @@ def audit_code() -> None:
         src = src_by_file.get(f, f.read_text())
         # 減配を扱っているのに、判定を自前で書いている（共有の入り口を通っていない）
         uses_cut = "had_cut" in src or "cut_1y" in src or "cut_" in src and "cut_years" in src
+        # 共有の入り口は3つ。どれかを通っていれば、判定は1か所に集約されている。
+        #   modules.dividend_history.build_profile  … 判定そのもの
+        #   modules.hist_panel.load_cached          … パネル（内部で build_profile）
+        #   modules.validation.build_outcomes       … 本検証（内部で build_profile）
         shared = ("build_profile" in src or "load_cached" in src
-                  or "from modules.hist_panel" in src)
+                  or "from modules.hist_panel" in src
+                  or "build_outcomes" in src)
         if uses_cut and not shared:
             dupes.append(f.name)
     chk("減配の判定が build_profile に統一されている", not dupes, "／".join(dupes))
