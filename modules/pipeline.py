@@ -178,6 +178,14 @@ def attach_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
         "ON s.ticker = x.ticker AND s.asof = x.m"
     ).set_index("ticker").drop(columns=["asof"], errors="ignore")
 
+    # DBに1つでも数字でない値が混ざると列全体が文字列になり、以降の比較が
+    # TypeError で落ちる（実測: yfinance が赤字企業の PER に文字列 "Infinity" を
+    # 返していた）。取り込み側でも弾いているが、**画面を開くだけで落ちる**種類の
+    # 事故なので、読む側でも必ず数値に直す。数字でないものは欠損にする。
+    for c in snap.columns:
+        if snap[c].dtype == object:
+            snap[c] = pd.to_numeric(snap[c], errors="coerce")
+
     out = df.join(metrics, how="left", rsuffix="_f").join(snap, how="left", rsuffix="_s")
 
     shares = out["shares"]

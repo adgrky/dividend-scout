@@ -13,6 +13,8 @@ info["payoutRatio"] は信用しない（実測: 4967 で 4.80 = 480%）。
 """
 from __future__ import annotations
 
+import math
+
 import threading
 import time
 import warnings
@@ -84,6 +86,25 @@ _ROW_ALIASES = {
 }
 
 
+def _num(v) -> float | None:
+    """yfinance の info から数字だけを取り出す。
+
+    赤字の会社の PER に **文字列 "Infinity"** が返ってくる（実測: 2676.T / 3543.T）。
+    JSON の Infinity トークンがそのまま文字列で渡ってくるためで、数値ではない。
+    そのまま DB に入れると列全体が文字列になり、次のスキャンで
+    `df["per"] > 0` が TypeError で落ちる。**画面には何も出ないまま更新が止まる。**
+    取り込む手前で数字以外を落とす。
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+
 def _pick(frames: list[pd.DataFrame], key: str, col) -> float | None:
     for name in _ROW_ALIASES[key]:
         for df in frames:
@@ -137,14 +158,14 @@ def fetch_one(ticker: str, retries: int = 2,
     snap = {
         "ticker": ticker,
         "asof": pd.Timestamp.today().strftime("%Y-%m-%d"),
-        "market_cap": info.get("marketCap"),
-        "per": info.get("trailingPE"),
-        "pbr": info.get("priceToBook"),
-        "roe": info.get("returnOnEquity"),
+        "market_cap": _num(info.get("marketCap")),
+        "per": _num(info.get("trailingPE")),
+        "pbr": _num(info.get("priceToBook")),
+        "roe": _num(info.get("returnOnEquity")),
         # info["payoutRatio"] は壊れていることがあるので参考値として持つだけ。
         # 実際の判定には modules/scoring.py で自前計算した値を使う。
-        "payout_ratio": info.get("payoutRatio"),
-        "held_pct_institutions": info.get("heldPercentInstitutions"),
+        "payout_ratio": _num(info.get("payoutRatio")),
+        "held_pct_institutions": _num(info.get("heldPercentInstitutions")),
     }
     return pd.DataFrame(rows).reindex(columns=FUNDAMENTAL_COLS), snap
 
