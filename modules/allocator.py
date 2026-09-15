@@ -1,16 +1,24 @@
 """資金投入の配分エンジン。
 
 「トレードで出た利益を移した。どこに入れるか」に答えるのが仕事。
-スコアが高い順に上から買うだけだと業種が偏るので、33業種の上限を制約にした
-貪欲法で埋めていく。単元株（原則100株）の刻みも考慮しないと現実に発注できない。
 
-最適化ソルバは使わない。制約が少なく、上位候補から順に「入れられるか」を
-判定していくだけで十分な精度が出るうえ、なぜその配分になったかを1行ずつ
-説明できる。説明できない配分は使えない。
+【発掘スコア順に買わない】
+発掘スコア（total）には「見過ごされ度」が入っている。市場に気づかれていないことは
+**見つける理由**にはなっても、**いま買う理由**にはならない。
+限られた資金の配り先を決めるときは、次の4つで優劣をつける。
+
+    割安度        その銘柄自身の過去と比べて安いか（検証で唯一きれいに効いた）
+    配当継続      買ったあと減配しないか
+    目標到達      目標利回りに届いているか（届いていないなら待つのがヘム流）
+    補完度        空いている業種・空いている配当月を埋めるか
+
+重みは config.yaml の buy_priority。
+
+最適化ソルバは使わない。上位候補から順に「入れられるか」を判定していくだけで
+十分な精度が出るうえ、なぜその配分になったかを1行ずつ説明できる。
+説明できない配分は使えない。
 """
 from __future__ import annotations
-
-import math
 
 import numpy as np
 import pandas as pd
@@ -24,23 +32,74 @@ def _lot_size(price: float, budget: float) -> int:
     return int(budget // (price * _LOT)) * _LOT
 
 
+def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
+                 month_gap: dict[int, float] | None = None) -> pd.DataFrame:
+    """買い付け優先度（0〜100）と、その内訳を付けて返す。"""
+    w = config["buy_priority"]
+    cap = config["portfolio"]["max_sector_weight"]
+    total_eval = positions["eval_value"].sum() if not positions.empty else 0.0
+    sector_now = (positions.groupby("sector33")["eval_value"].sum()
+                  if not positions.empty else pd.Series(dtype=float))
+
+    c = cand.copy()
+
+    # 割安度：自己利回り順位をそのまま 0〜100 に
+    c["_割安度"] = (c["yield_percentile"].fillna(0.5) * 100).clip(0, 100)
+
+    # 配当継続
+    c["_継続"] = c["health"].fillna(0).clip(0, 100)
+
+    # 目標到達度：現在利回り ÷ 目標利回り。届いていれば100点、半分なら50点。
+    tgt = c["target_yield"].fillna(0.047).replace(0, np.nan)
+    c["_目標到達"] = (c["dividend_yield"] / tgt * 100).clip(0, 100).fillna(0)
+
+    # 補完度：業種の空き枠と、配当月の空きの平均
+    if total_eval > 0:
+        used = c["sector33"].map(sector_now).fillna(0.0)
+        room = ((cap * total_eval - used) / (cap * total_eval)).clip(0, 1)
+    else:
+        room = pd.Series(1.0, index=c.index)
+    if month_gap:
+        def _month_score(s: str) -> float:
+            months = [int(m.replace("月", "")) for m in str(s).split("・") if m]
+            if not months:
+                return 0.5
+            return float(np.mean([month_gap.get(m, 0.5) for m in months]))
+        month_fit = c["payout_months"].fillna("").map(_month_score)
+    else:
+        month_fit = pd.Series(0.5, index=c.index)
+    c["_補完度"] = ((room + month_fit) / 2 * 100).clip(0, 100)
+
+    c["買い付け優先度"] = (
+        c["_割安度"] * w["valuation"] + c["_継続"] * w["health"]
+        + c["_目標到達"] * w["target_reach"] + c["_補完度"] * w["fit"]
+    ) / sum(w.values())
+    return c
+
+
+def month_gaps(positions: pd.DataFrame, calendar: pd.DataFrame | None) -> dict[int, float]:
+    """月ごとの「受け取りの少なさ」を 0〜1 で返す。空いている月ほど1に近い。"""
+    if calendar is None or calendar.empty:
+        return {}
+    amt = calendar.set_index("month")["amount"]
+    peak = amt.max()
+    if not peak:
+        return {}
+    return {int(m): float(1 - v / peak) for m, v in amt.items()}
+
+
 def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
-             config: dict, max_names: int = 8,
+             config: dict, max_names: int = 12,
              per_name_cap_pct: float = 0.25,
-             require_below_target: bool = True) -> pd.DataFrame:
+             require_below_target: bool = True,
+             month_gap: dict[int, float] | None = None) -> pd.DataFrame:
     """入金額を候補に割り振る。
 
     Parameters
     ----------
-    cash : float
-        今回投入する金額
-    candidates : DataFrame
-        発掘の結果。ticker/name/sector33/total/last_close/dividend_yield/
-        target_yield（あれば）を持つ
-    positions : DataFrame
-        現在の保有（modules.portfolio.load_positions の出力）
     max_names : int
-        1回の投入で買う銘柄数の上限。分散させすぎると監視が回らない
+        1回の投入で買う銘柄数の上限。ヘムは360〜400銘柄に超分散している。
+        機械的な基準で選び、監視はアプリがやるのだから、絞る理由は薄い。
     per_name_cap_pct : float
         1銘柄あたりの投入上限（今回の入金額に対する比率）
     require_below_target : bool
@@ -54,12 +113,15 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
     sector_now = (positions.groupby("sector33")["eval_value"].sum()
                   if not positions.empty else pd.Series(dtype=float))
 
-    c = candidates.copy()
-    c = c[c["last_close"].fillna(0) > 0]
+    c = candidates[candidates["last_close"].fillna(0) > 0].copy()
     if require_below_target and "target_yield" in c.columns:
-        # 目標利回りに届いている＝いま買っていい水準、という判定
         c = c[c["dividend_yield"].fillna(0) >= c["target_yield"].fillna(0)]
-    c = c.sort_values("total", ascending=False)
+    if c.empty:
+        return pd.DataFrame()
+
+    c = buy_priority(c, positions, config, month_gap)
+    # 発掘スコアではなく買い付け優先度の順に配る
+    c = c.sort_values("買い付け優先度", ascending=False)
 
     per_name_cap = cash * per_name_cap_pct
     remaining = cash
@@ -89,9 +151,13 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
             "投入額": amount,
             "利回り": r.get("dividend_yield"),
             "年間配当": amount * (r.get("dividend_yield") or 0),
-            "スコア": r.get("total"),
-            "自己利回り順位": r.get("yield_percentile"),
-            "連続増配": r.get("streak"),
+            "買い付け優先度": r["買い付け優先度"],
+            "割安度": r["_割安度"],
+            "継続": r["_継続"],
+            "目標到達": r["_目標到達"],
+            "補完度": r["_補完度"],
+            "発掘スコア": r.get("total"),
+            "配当月": r.get("payout_months"),
             "業種の空き枠": max(cap_sector * total_after - used, 0.0),
         })
         remaining -= amount
