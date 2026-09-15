@@ -224,6 +224,23 @@ def read_df(sql: str, params: tuple = (), path: Path | None = None) -> pd.DataFr
         return pd.read_sql_query(sql, conn, params=params)
 
 
+def latest_scores(path: Path | None = None) -> pd.DataFrame:
+    """最新スナップショットのスコアをユニバース情報つきで返す。
+
+    画面はこれだけあれば描ける。ここを pipeline 側に置いていたせいで、
+    表を見るだけの操作でも yfinance・curl_cffi・peewee・bs4 まで読み込まれていた
+    （実測 1.17秒）。取得系と閲覧系は import の経路から分けておく。
+    """
+    return read_df("""
+        SELECT s.*, u.name, u.sector33, u.market, u.code,
+               q.last_close, q.pos_52w, q.avg_turnover
+        FROM scores s
+        JOIN universe u ON u.ticker = s.ticker
+        LEFT JOIN quotes q ON q.ticker = s.ticker
+        WHERE s.asof = (SELECT MAX(asof) FROM scores)
+    """, path=path)
+
+
 def get_setting(key: str, default=None, path: Path | None = None):
     with connect(path) as conn:
         row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()

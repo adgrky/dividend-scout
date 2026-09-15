@@ -20,7 +20,7 @@ import pandas as pd
 from modules import fundamentals as fnd
 from modules import scoring, traps
 from modules.dividend_history import build_profiles, profiles_to_frame
-from modules.store import read_df, upsert_df
+from modules.store import latest_scores, read_df, upsert_df  # noqa: F401  （後方互換のため再輸出）
 from modules.quality import trim_frame
 from modules.valuation import build_valuation_table
 
@@ -178,13 +178,3 @@ def run_scoring(config: dict, asof: str | None = None,
     return gated.join(scores[["total"] + scoring.LAYERS + ["trap_penalty"]], how="left")
 
 
-def latest_scores() -> pd.DataFrame:
-    """最新スナップショットのスコアをユニバース情報つきで返す。"""
-    return read_df("""
-        SELECT s.*, u.name, u.sector33, u.market, u.code,
-               q.last_close, q.pos_52w, q.avg_turnover
-        FROM scores s
-        JOIN universe u ON u.ticker = s.ticker
-        LEFT JOIN quotes q ON q.ticker = s.ticker
-        WHERE s.asof = (SELECT MAX(asof) FROM scores)
-    """)

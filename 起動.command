@@ -6,24 +6,26 @@
 set -e
 cd "$(dirname "$0")"
 
-echo "==========================================="
-echo "  🔭 dividend-scout 起動中…"
-echo "==========================================="
-echo ""
-
-if ! command -v uv >/dev/null 2>&1; then
-  echo "⚠ uv が見つかりません。先にこれを実行してください:"
-  echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"
-  read -n 1 -s -r -p "Enter キーでウィンドウを閉じます…"
-  exit 1
-fi
+echo "🔭 dividend-scout"
 
 if [ ! -d ".venv" ]; then
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "⚠ uv が見つかりません。先にこれを実行してください:"
+    echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"
+    read -n 1 -s -r -p "Enter キーでウィンドウを閉じます…"
+    exit 1
+  fi
   echo "▶ 初回起動: 環境を作っています（数分かかります）…"
   uv venv --python 3.11
   uv pip install -r requirements.txt
+  shasum requirements.txt > .venv/.reqs.sha
 else
-  uv pip install -q -r requirements.txt 2>/dev/null || true
+  # 毎回 uv を呼ぶと起動が遅くなるので、requirements.txt が変わったときだけ入れ直す
+  if ! shasum -c .venv/.reqs.sha >/dev/null 2>&1; then
+    echo "▶ 必要なものを更新しています…"
+    uv pip install -r requirements.txt
+    shasum requirements.txt > .venv/.reqs.sha
+  fi
 fi
 
 if [ ! -f "data/scout.db" ]; then
@@ -35,9 +37,7 @@ if [ ! -f "data/scout.db" ]; then
   exit 1
 fi
 
-echo ""
-echo "▶ ブラウザが自動で開きます"
-echo "  終了するには、この画面で Control + C"
+echo "▶ ブラウザが開きます。終了するには Control + C"
 echo ""
 
 exec .venv/bin/streamlit run app.py --server.port 8502

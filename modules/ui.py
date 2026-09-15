@@ -5,8 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from modules.config import load_config
-from modules.pipeline import latest_scores
-from modules.store import read_df
+from modules.store import latest_scores, read_df
 
 LAYER_LABELS = {
     "capacity": "増配余力",
