@@ -169,6 +169,14 @@ def audit_contradictions() -> None:
             not (reach & set(a[a.kind == "trap"].ticker)))
         chk("同じ銘柄に重大警報が2つ出ない",
             not (a[a.severity == "high"].groupby("ticker").size() > 1).any())
+        # 監視の種別を増やしたのに画面側に足し忘れると、警報が黙って消える
+        import re
+        ui = set(re.findall(r'"(\w+)":\s+\("',
+                            (Path(__file__).resolve().parent.parent
+                             / "views" / "3_monitor.py").read_text()))
+        missing = set(a["kind"]) - ui
+        chk("監視が出す警報を、画面がすべて知っている", not missing,
+            "／".join(sorted(missing)))
 
 
 # ──────────────────────────────────────────── C 空データ・異常値
