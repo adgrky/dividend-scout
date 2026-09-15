@@ -31,7 +31,7 @@ from modules.pipeline import load_base, prescreen                 # noqa: E402
 from modules.store import connect, init_db, read_df, upsert_df    # noqa: E402
 
 _INDEX_COLS = ["code", "doc_id", "filer_name", "period_end", "submit_date", "fetched_at"]
-_SUMMARY_COLS = ["ticker", "fiscal_year", "sales", "ordinary_income", "net_income", "eps",
+_SUMMARY_COLS = ["ticker", "fiscal_year", "basis", "sales", "ordinary_income", "net_income", "eps",
                  "dps", "payout_ratio", "roe", "equity_ratio", "net_assets", "total_assets",
                  "operating_cf", "employees"]
 _PROFILE_COLS = ["ticker", "business_ja", "business_en", "employees", "ex_dividend_date",

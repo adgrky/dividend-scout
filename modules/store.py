@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS edinet_index (
 CREATE TABLE IF NOT EXISTS edinet_summary (   -- 主要な経営指標等の推移（5年分）
     ticker          TEXT NOT NULL,
     fiscal_year     INTEGER NOT NULL,
+    basis           TEXT,               -- 連結 / 単体（混ぜると無意味になるので記録する）
     sales           REAL,
     ordinary_income REAL,
     net_income      REAL,
@@ -249,6 +250,7 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 # ここで ALTER TABLE を当てる。すでにある場合の例外は握りつぶす。
 _MIGRATIONS = [
     ("scores", "health", "REAL"),
+    ("edinet_summary", "basis", "TEXT"),
     ("company_profile", "dividend_policy", "TEXT"),
     ("company_profile", "policy_flags", "TEXT"),
     ("company_profile", "policy_score", "REAL"),

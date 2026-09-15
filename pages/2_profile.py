@@ -67,22 +67,37 @@ if row["gate_passed"] != 1:
     st.error(f"**採用基準を外れている**：{row['gate_reason']}")
 
 # ── 0. 何をやっている会社か ──
-if not company.empty and company["business_ja"].iloc[0]:
-    biz = str(company["business_ja"].iloc[0])
-    # 見出し番号（「３ 【事業の内容】」）は読みづらいので落とす
-    biz = biz.split("【事業の内容】")[-1].strip()
+st.markdown("#### この会社は何をやっているか")
+biz_ja = biz_en = ""
+emp = None
+if not company.empty:
+    biz_ja = str(company["business_ja"].iloc[0] or "").split("【事業の内容】")[-1].strip()
+    biz_en = str(company["business_en"].iloc[0] or "").strip()
     emp = company["employees"].iloc[0]
-    st.markdown("#### この会社は何をやっているか")
-    st.info(biz[:400] + ("…" if len(biz) > 400 else ""))
-    meta = [f"業種：{row['sector33']}", f"市場：{row['market']}"]
-    if pd.notna(emp):
-        meta.append(f"従業員：{int(emp):,} 名")
-    if raw.get("market_cap_oku"):
-        meta.append(f"時価総額：{raw['market_cap_oku']:,.0f} 億円")
-    st.caption("　／　".join(meta) + "　（出典：有価証券報告書）")
-else:
+
+# 大企業の有報は「事業の内容」が他ページへの参照だけのことがある
+# （実測: 三菱商事は「連結財務諸表注記1をご参照ください」）。
+# 中身が薄いときは英文の会社概要で補う。
+ja_is_thin = (not biz_ja) or len(biz_ja) < 60 or "参照" in biz_ja[:80]
+
+if biz_ja:
+    st.info(biz_ja[:400] + ("…" if len(biz_ja) > 400 else ""))
+    st.caption("出典：有価証券報告書「事業の内容」")
+if ja_is_thin and biz_en:
+    st.info(biz_en[:400] + ("…" if len(biz_en) > 400 else ""))
+    st.caption("出典：yfinance の会社概要（有報の記載が参照のみだったため補足）")
+if not biz_ja and not biz_en:
     st.warning(f"事業の内容がまだ取れていません（{row['sector33']}／{row['market']}）。"
                "`uv run python scripts/fetch_edinet.py --fetch` で取得できます。")
+
+meta = [f"業種：{row['sector33']}", f"市場：{row['market']}"]
+if pd.notna(emp):
+    meta.append(f"従業員：{int(emp):,} 名")
+if raw.get("market_cap_oku"):
+    meta.append(f"時価総額：{raw['market_cap_oku']:,.0f} 億円")
+if not company.empty and pd.notna(company["industry_en"].iloc[0]):
+    meta.append(f"業界：{company['industry_en'].iloc[0]}")
+st.caption("　／　".join(meta))
 
 st.divider()
 
@@ -144,7 +159,8 @@ st.dataframe(facts, hide_index=True, width="stretch", height=460,
 
 # ── 有報の5年推移 ──
 if not edinet.empty:
-    with st.expander(f"有価証券報告書「主要な経営指標等の推移」（{len(edinet)}年分）"):
+    basis = edinet["basis"].dropna().iloc[0] if "basis" in edinet.columns and edinet["basis"].notna().any() else "—"
+    with st.expander(f"有価証券報告書「主要な経営指標等の推移」（{len(edinet)}年分・{basis}ベース）"):
         show = edinet[["fiscal_year", "sales", "net_income", "eps", "dps",
                        "payout_ratio", "roe", "equity_ratio", "operating_cf", "employees"]].copy()
         for c in ("payout_ratio", "roe", "equity_ratio"):
@@ -158,12 +174,18 @@ if not edinet.empty:
             "純利益": st.column_config.NumberColumn(format="%.0f"),
             "営業CF": st.column_config.NumberColumn(format="%.0f"),
             "EPS": st.column_config.NumberColumn(format="¥%.2f"),
-            "1株配当": st.column_config.NumberColumn(format="¥%.2f"),
+            "1株配当": st.column_config.NumberColumn(
+                format="¥%.2f",
+                help="有報に記載されたままの値。**株式分割が調整されていない**ので、"
+                     "分割をまたぐと連続しません（増配率の計算には使っていません）"),
             "配当性向": st.column_config.NumberColumn(format="%.1f%%"),
             "ROE": st.column_config.NumberColumn(format="%.1f%%"),
             "自己資本比率": st.column_config.NumberColumn(format="%.1f%%"),
         })
-        st.caption("金融庁 EDINET に提出された確定値です。")
+        st.caption(f"金融庁 EDINET に提出された確定値（{basis}ベース）。"
+                   "**1株配当は株式分割が調整されていません**（分割をまたぐと連続しません）。"
+                   "増配率は分割調整済みの配当履歴から別途計算しています。"
+                   "配当性向が空欄なのは、その基準での開示が無い場合です。")
 
 st.divider()
 
