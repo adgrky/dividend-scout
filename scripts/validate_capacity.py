@@ -1,31 +1,32 @@
-"""A層（増配余力）の検証。配当性向・営業CFの厚み・自己資本比率は効くのか。
+"""A層（増配余力）の検証。配当性向・営業CFの厚み・自己資本比率・ROEは効くのか。
 
-【なぜ今まで検証していなかったか、そしてなぜ今できるのか】
-yfinance の財務は4〜5期分しか取れないので、2014年や2016年時点の配当性向は
-再現できない。だから「検証不能」として等ウェイトに置いていた。
+【なぜ複数コホートにしたか】
+最初は FY2022 起点の1コホート・3年しか測れなかった。1つでは「時期をまたいで
+安定しているか」が確かめられず、足切りを既定にしてよいか判断できない。
 
-しかし **EDINET の「主要な経営指標等の推移」には5年分入っている**。
-実測すると FY2022 から約1,250社ぶん揃う。1コホート・3年先までなら測れる。
-「検証不能」ではなく「1コホート・3年で測れる」が正しかった。
+過去の有報を取り込んで（scripts/fetch_edinet_history.py）FY2014 まで遡れたので、
+本検証（株価・配当）と同じ 4コホート・5年で測り直す。
 
-【設計】
-    起点   2023-06-30（FY2022 の有価証券報告書が出そろう時期）
-           先読みを避けるため、この日までに公表されている情報だけを使う
-    実績   2023-06-30 → 2026-06-30 の3年間
-           ・1株配当の伸び ・トータルリターン ・減配の有無
+【起点の置き方】
+FY○○ の有報は、決算期末から3ヶ月以内＝翌年6月までに出る。
+そこで **起点は (FY+1)年6月30日**。その日までに公表されている情報だけを使う。
 
-【この検証の弱さ（先に書いておく）】
-    1. コホートが1つしかない。時期をまたいで安定しているか確かめられない
-    2. 3年で、ほかの検証（5年）より短い
-    3. 2023〜2026年は日本株が強かった時期。弱気相場では違う結果になりうる
-    4. 母集団は EDINET を取得した1,267社＝粗いふるいを通った銘柄に偏っている
-    これらを踏まえ、**結果が良くても重みを大きく上げない**。
+    FY2014 → 起点 2015-06-30 → 実績 2020-06-30
+    FY2016 → 起点 2017-06-30 → 実績 2022-06-30
+    FY2018 → 起点 2019-06-30 → 実績 2024-06-30
+    FY2020 → 起点 2021-06-30 → 実績 2026-06-30
+
+【学習と検証の分け方】
+前半（FY2014・FY2016）で見て、後半（FY2018・FY2020）で答え合わせする。
+全期間の最良値でチューニングしない。
 
 使い方:
     uv run python scripts/validate_capacity.py
+    uv run python scripts/validate_capacity.py --fy 2014,2016,2018,2020 --horizon 5
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -36,73 +37,77 @@ import pandas as pd                                   # noqa: E402
 from scipy.stats import spearmanr                     # noqa: E402
 
 from modules.store import read_df                     # noqa: E402
-from modules.quality import trim_frame, winsorize     # noqa: E402
+from modules.quality import trim_frame                # noqa: E402
 
-ASOF = pd.Timestamp("2023-06-30")
-END = pd.Timestamp("2026-06-30")
-BASE_FY = 2022
+FACTORS = {
+    "A_配当性向の低さ": "payout_neg",
+    "A_営業CFの厚み": "ocf_cover",
+    "A_自己資本比率": "equity_ratio",
+    "A_ROE": "roe",
+    "（比較）起点の利回り": "start_yield",
+}
+OUTCOMES = {"DPS成長": "fwd_dps_growth", "トータルリターン": "fwd_total_return",
+            "減配の発生": "fwd_had_cut"}
 
 
-def _hr(t):
+def _hr(t: str) -> None:
     print("\n" + "─" * 80 + f"\n{t}\n" + "─" * 80)
 
 
-def build() -> pd.DataFrame:
-    fin = read_df(
-        "SELECT ticker, fiscal_year, net_income, eps, dps, roe, equity_ratio, operating_cf "
-        "FROM edinet_summary WHERE fiscal_year = ?", (BASE_FY,))
+def build_cohort(fy: int, horizon: int, prices: pd.DataFrame,
+                 div: pd.DataFrame) -> pd.DataFrame:
+    """FY○○ の財務を起点に、horizon 年先の実績と突き合わせる。"""
+    asof = pd.Timestamp(f"{fy + 1}-06-30")
+    end = asof + pd.DateOffset(years=horizon)
+    if end > pd.Timestamp.today():
+        return pd.DataFrame()
+
+    fin = read_df("SELECT ticker, net_income, eps, dps, roe, equity_ratio, operating_cf "
+                  "FROM edinet_summary WHERE fiscal_year = ?", (fy,))
     fin = fin[fin["eps"].notna() & (fin["eps"] != 0)]
-    print(f"  FY{BASE_FY} の財務が取れた銘柄: {len(fin):,}")
+    if fin.empty:
+        return pd.DataFrame()
 
-    # 配当性向 = 1株配当 ÷ 1株利益。どちらも同じ有報の同じ年度なので、
-    # 株式分割が調整されていなくても **比率は正しい**。
-    fin["payout"] = fin["dps"] / fin["eps"]
-    # 発行済株数を EPS から逆算し、配当総額に対する営業CFの厚みを出す
-    fin["shares"] = fin["net_income"] / fin["eps"]
-    fin["div_total"] = fin["dps"] * fin["shares"]
-    fin["ocf_cover"] = np.where(fin["div_total"] > 0,
-                                fin["operating_cf"] / fin["div_total"], np.nan)
+    fin["payout_neg"] = -(fin["dps"] / fin["eps"])
+    shares = fin["net_income"] / fin["eps"]
+    div_total = fin["dps"] * shares
+    fin["ocf_cover"] = np.where(div_total > 0, fin["operating_cf"] / div_total, np.nan)
 
-    prices, _ = trim_frame(read_df("SELECT ticker, date, close FROM prices"))
-    prices["date"] = pd.to_datetime(prices["date"])
-    div = read_df("SELECT ticker, date, amount FROM dividends")
-    div["date"] = pd.to_datetime(div["date"])
+    px_all = {t: g.set_index("date")["close"].sort_index()
+              for t, g in prices.groupby("ticker")}
+    dv_all = {t: g.set_index("date")["amount"].sort_index()
+              for t, g in div.groupby("ticker")}
 
     rows = []
-    for t, f in fin.set_index("ticker").iterrows():
-        px = prices[prices["ticker"] == t].set_index("date")["close"].sort_index()
-        dv = div[div["ticker"] == t].set_index("date")["amount"].sort_index()
-        if px.empty or dv.empty:
+    for r in fin.itertuples(index=False):
+        px, dv = px_all.get(r.ticker), dv_all.get(r.ticker)
+        if px is None or dv is None or px.empty or dv.empty:
             continue
-        p0 = px[px.index <= ASOF]
-        p1 = px[px.index <= END]
-        if p0.empty or p1.empty or p1.index.max() < END - pd.Timedelta(days=45):
+        p0 = px[px.index <= asof]
+        p1 = px[px.index <= end]
+        if p0.empty or p1.empty or px.index.max() < end - pd.Timedelta(days=45):
             continue
         price0, price1 = float(p0.iloc[-1]), float(p1.iloc[-1])
         if price0 <= 0:
             continue
-
-        # 起点の1株配当（直前1年）と、3年後の1株配当（直前1年）
-        d0 = float(dv[(dv.index > ASOF - pd.DateOffset(years=1)) & (dv.index <= ASOF)].sum())
-        d1 = float(dv[(dv.index > END - pd.DateOffset(years=1)) & (dv.index <= END)].sum())
+        d0 = float(dv[(dv.index > asof - pd.DateOffset(years=1)) & (dv.index <= asof)].sum())
         if d0 <= 0:
             continue
-        received = float(dv[(dv.index > ASOF) & (dv.index <= END)].sum())
-
-        # 期間中に「前年より減った年」があったか
+        d1 = float(dv[(dv.index > end - pd.DateOffset(years=1)) & (dv.index <= end)].sum())
+        received = float(dv[(dv.index > asof) & (dv.index <= end)].sum())
         had_cut = False
-        for k in (1, 2, 3):
-            a = float(dv[(dv.index > ASOF + pd.DateOffset(years=k - 1))
-                         & (dv.index <= ASOF + pd.DateOffset(years=k))].sum())
-            b = float(dv[(dv.index > ASOF + pd.DateOffset(years=k))
-                         & (dv.index <= ASOF + pd.DateOffset(years=k + 1))].sum())
+        for k in range(horizon):
+            a = float(dv[(dv.index > asof + pd.DateOffset(years=k))
+                         & (dv.index <= asof + pd.DateOffset(years=k + 1))].sum())
+            b = float(dv[(dv.index > asof + pd.DateOffset(years=k + 1))
+                         & (dv.index <= asof + pd.DateOffset(years=k + 2))].sum())
             if a > 0 and b > 0 and b < a * 0.999:
                 had_cut = True
         rows.append({
-            "ticker": t,
-            "配当性向": f["payout"], "営業CFの厚み": f["ocf_cover"],
-            "ROE": f["roe"], "自己資本比率": f["equity_ratio"],
-            "起点の利回り": d0 / price0,
+            "ticker": r.ticker, "fy": fy,
+            "payout_neg": r.payout_neg, "ocf_cover": r.ocf_cover,
+            "equity_ratio": r.equity_ratio, "roe": r.roe,
+            "start_yield": d0 / price0,
             "fwd_dps_growth": d1 / d0 - 1,
             "fwd_total_return": (price1 + received) / price0 - 1,
             "fwd_had_cut": int(had_cut),
@@ -111,93 +116,128 @@ def build() -> pd.DataFrame:
 
 
 def main() -> None:
-    print(f"A層（増配余力）の検証  起点 {ASOF:%Y-%m-%d} → 実績 {END:%Y-%m-%d}（3年）")
-    df = build()
-    print(f"  実績まで追えた銘柄: {len(df):,}")
-    if len(df) < 200:
-        print("  少なすぎて判定できない")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fy", default="2014,2016,2018,2020")
+    ap.add_argument("--horizon", type=int, default=5)
+    a = ap.parse_args()
+    fys = [int(x) for x in a.fy.split(",")]
+
+    print(f"A層（増配余力）の検証  起点 FY{fys} ／ 先 {a.horizon} 年")
+    prices, _ = trim_frame(read_df("SELECT ticker, date, close FROM prices"))
+    prices["date"] = pd.to_datetime(prices["date"])
+    div = read_df("SELECT ticker, date, amount FROM dividends")
+    div["date"] = pd.to_datetime(div["date"])
+
+    frames = {}
+    for fy in fys:
+        c = build_cohort(fy, a.horizon, prices, div)
+        if c.empty:
+            print(f"  FY{fy}: 作れませんでした（財務か実績が足りない）")
+            continue
+        print(f"  FY{fy}（起点 {fy+1}-06-30 → 実績 {fy+1+a.horizon}-06-30）: {len(c):,} 銘柄")
+        frames[fy] = c
+    if not frames:
+        print("コホートが1つも作れませんでした")
         return
+    df = pd.concat(frames.values(), ignore_index=True)
+    print(f"  合計 延べ {len(df):,} 銘柄 / {len(frames)} コホート")
 
-    factors = {
-        "A_配当性向の低さ": -df["配当性向"],
-        "A_営業CFの厚み": df["営業CFの厚み"],
-        "A_自己資本比率": df["自己資本比率"],
-        "A_ROE": df["ROE"],
-        "（比較）起点の利回り": df["起点の利回り"],
-    }
-    outcomes = {"DPS成長（3年）": "fwd_dps_growth",
-                "トータルリターン（3年）": "fwd_total_return",
-                "減配の発生": "fwd_had_cut"}
-
-    _hr("1. 各指標と3年後の実績の順位相関")
+    _hr("1. 各指標と実績の順位相関（全コホート結合）")
     tbl = {}
-    for fname, fv in factors.items():
+    for fname, col in FACTORS.items():
         tbl[fname] = {}
-        for oname, ocol in outcomes.items():
-            m = fv.notna() & df[ocol].notna()
-            if m.sum() < 100:
-                tbl[fname][oname] = np.nan
-                continue
-            tbl[fname][oname] = spearmanr(fv[m], df.loc[m, ocol]).statistic
-    t = pd.DataFrame(tbl).T.round(3)
-    print(t.to_string())
+        for oname, ocol in OUTCOMES.items():
+            m = df[col].notna() & df[ocol].notna()
+            tbl[fname][oname] = (spearmanr(df.loc[m, col], df.loc[m, ocol]).statistic
+                                 if m.sum() >= 100 else np.nan)
+    print(pd.DataFrame(tbl).T.round(3).to_string())
     print("\n目安: |相関| < 0.05 はノイズ。0.10 を超えたら意味がある可能性がある。")
 
-    _hr("2. 分位別の実績（5分位・中央値）")
-    for fname, fv in factors.items():
-        m = fv.notna()
+    if len(frames) > 1:
+        _hr("2. コホート別（時期をまたいで安定しているか）")
+        for oname, ocol in OUTCOMES.items():
+            rows = {}
+            for fy, c in frames.items():
+                rows[fy] = {fn: (spearmanr(c.loc[c[col].notna() & c[ocol].notna(), col],
+                                           c.loc[c[col].notna() & c[ocol].notna(), ocol]).statistic
+                                 if (c[col].notna() & c[ocol].notna()).sum() >= 50 else np.nan)
+                            for fn, col in FACTORS.items()}
+            print(f"\n【{oname}】")
+            print(pd.DataFrame(rows).round(3).to_string())
+        print("\n符号がコホートごとに入れ替わる指標は、効いていないと考えるべき。")
+
+    _hr("3. 分位別の実績（5分位・中央値）")
+    for fname, col in FACTORS.items():
+        m = df[col].notna()
         if m.sum() < 300:
             continue
-        q = pd.qcut(fv[m].rank(method="first"), 5, labels=[f"Q{i}" for i in range(1, 6)])
+        q = pd.qcut(df.loc[m, col].rank(method="first"), 5,
+                    labels=[f"Q{i}" for i in range(1, 6)])
         g = df[m].groupby(q, observed=True).agg(
-            n=("ticker", "count"),
             DPS成長=("fwd_dps_growth", "median"),
             リターン=("fwd_total_return", "median"),
             減配率=("fwd_had_cut", "mean"))
         print(f"\n  【{fname}】（Q5が最上位）")
-        line_d = "  ".join(f"{i}:{v:+.0%}" for i, v in zip(g.index, g["DPS成長"]))
-        line_r = "  ".join(f"{i}:{v:+.0%}" for i, v in zip(g.index, g["リターン"]))
-        line_c = "  ".join(f"{i}:{v:.0%}" for i, v in zip(g.index, g["減配率"]))
-        print(f"    DPS成長  {line_d}")
-        print(f"    リターン {line_r}")
-        print(f"    減配率   {line_c}")
+        print("    DPS成長  " + "  ".join(f"{i}:{v:+.0%}" for i, v in zip(g.index, g["DPS成長"])))
+        print("    リターン " + "  ".join(f"{i}:{v:+.0%}" for i, v in zip(g.index, g["リターン"])))
+        print("    減配率   " + "  ".join(f"{i}:{v:.0%}" for i, v in zip(g.index, g["減配率"])))
 
-    _hr("3. 配当性向のスイートスポット（30〜50%が最高という前提は正しいか）")
-    d = df[df["配当性向"].between(-0.5, 3.0)].copy()
+    _hr("4. 配当性向の帯ごとの実績（30〜50%が最高という前提は正しいか）")
+    d = df.copy()
+    d["payout"] = -d["payout_neg"]
+    d = d[d["payout"].between(-0.5, 3.0)]
     bins = [-np.inf, 0.15, 0.30, 0.50, 0.70, 1.00, np.inf]
     labels = ["15%未満", "15-30%", "30-50%", "50-70%", "70-100%", "100%超"]
-    d["帯"] = pd.cut(d["配当性向"], bins, labels=labels)
+    d["帯"] = pd.cut(d["payout"], bins, labels=labels)
     g = d.groupby("帯", observed=True).agg(
         n=("ticker", "count"), DPS成長=("fwd_dps_growth", "median"),
         リターン=("fwd_total_return", "median"), 減配率=("fwd_had_cut", "mean"),
-        起点の利回り=("起点の利回り", "median"))
+        起点の利回り=("start_yield", "median"))
     for c in ("DPS成長", "リターン", "減配率", "起点の利回り"):
         g[c] = (g[c] * 100).round(1)
     print(g.to_string())
 
-    _hr("4. 高利回り × 減配歴なし に、増配余力を重ねたら減配は減るか")
-    hi = df["起点の利回り"] >= df["起点の利回り"].quantile(0.7)
-    ok_payout = df["配当性向"].between(0.0, 0.5)
-    ok_ocf = df["営業CFの厚み"] >= 3
-    for label, m in (("全体", pd.Series(True, index=df.index)),
-                     ("高利回り上位30%", hi),
-                     ("  ＋ 配当性向 50%以下", hi & ok_payout),
-                     ("  ＋ 営業CFが配当の3倍以上", hi & ok_payout & ok_ocf)):
-        s = df[m]
-        if len(s) < 30:
-            print(f"  {label:<30s} n={len(s):>5,}  （少なすぎる）")
-            continue
-        print(f"  {label:<30s} n={len(s):>5,}  減配率 {s['fwd_had_cut'].mean():>5.1%}"
-              f"  リターン {s['fwd_total_return'].median():>+7.1%}"
-              f"  DPS成長 {s['fwd_dps_growth'].median():>+7.1%}")
+    _hr("5. 高利回り × 増配余力の足切りは、減配を減らすか")
+    for label, sub in [("全コホート", df)] + (
+            [(f"FY{fy}", c) for fy, c in frames.items()] if len(frames) > 1 else []):
+        hi = sub["start_yield"] >= sub["start_yield"].quantile(0.7)
+        okp = (-sub["payout_neg"]).between(0.0, 0.5)
+        okf = sub["ocf_cover"] >= 3
+        print(f"\n  【{label}】")
+        for nm, m in (("全体", pd.Series(True, index=sub.index)),
+                      ("高利回り上位30%", hi),
+                      ("  ＋ 配当性向50%以下", hi & okp),
+                      ("  ＋ 営業CFが配当の3倍以上", hi & okp & okf)):
+            s = sub[m]
+            if len(s) < 30:
+                print(f"    {nm:<26s} n={len(s):>5,}  （少なすぎる）")
+                continue
+            print(f"    {nm:<26s} n={len(s):>5,}  減配率 {s['fwd_had_cut'].mean():>5.1%}"
+                  f"  リターン {s['fwd_total_return'].median():>+7.1%}"
+                  f"  DPS成長 {s['fwd_dps_growth'].median():>+7.1%}")
 
-    _hr("この検証の弱さ")
-    print("""  1. コホートが1つしかない。時期をまたいで安定しているか確かめられない
-  2. 3年で、ほかの検証（5年）より短い
-  3. 2023〜2026年は日本株が強かった時期。弱気相場では違う結果になりうる
-  4. 母集団は EDINET を取得した1,267社＝粗いふるいを通った銘柄に偏っている
-
-  → **結果が良くても、重みを大きく上げない。** 効いた向きだけを見る。""")
+    if len(frames) >= 4:
+        _hr("6. 前半で見て、後半で答え合わせ")
+        ys = sorted(frames)
+        half = len(ys) // 2
+        tr = pd.concat([frames[y] for y in ys[:half]], ignore_index=True)
+        te = pd.concat([frames[y] for y in ys[half:]], ignore_index=True)
+        print(f"  学習 FY{ys[:half]}（{len(tr):,}）／ 検証 FY{ys[half:]}（{len(te):,}）\n")
+        for nm, sub in (("学習", tr), ("検証", te)):
+            hi = sub["start_yield"] >= sub["start_yield"].quantile(0.7)
+            okp = (-sub["payout_neg"]).between(0.0, 0.5)
+            okf = sub["ocf_cover"] >= 3
+            base = sub[hi]
+            best = sub[hi & okp & okf]
+            if len(base) < 30 or len(best) < 30:
+                print(f"  {nm}: 少なすぎる")
+                continue
+            print(f"  {nm}：高利回りのみ 減配率 {base['fwd_had_cut'].mean():.1%} → "
+                  f"足切りあり {best['fwd_had_cut'].mean():.1%}"
+                  f"（{best['fwd_had_cut'].mean() - base['fwd_had_cut'].mean():+.1f}pt）"
+                  f"／ リターン {base['fwd_total_return'].median():+.1%} → "
+                  f"{best['fwd_total_return'].median():+.1%}")
+        print("\n  **後半でも同じ向きに動いていれば、足切りを既定にしてよい。**")
 
 
 if __name__ == "__main__":
