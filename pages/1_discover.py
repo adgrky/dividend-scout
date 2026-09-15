@@ -37,13 +37,9 @@ raw = pd.DataFrame([json.loads(x)["raw"] for x in passed["detail_json"]])
 view = pd.concat([passed, raw], axis=1)
 
 _MONTHS = ["—"] + [f"{m}月" for m in range(1, 13)]
-# 権利確定日はまだ取得途中のことがある。列が無い／全て欠損でも落ちないようにする。
-if "ex_dividend_date" in view.columns:
-    view["権利確定月"] = pd.to_datetime(view["ex_dividend_date"], errors="coerce").dt.month
-else:
-    view["権利確定月"] = pd.Series([pd.NA] * len(view), index=view.index)
-view["権利確定月ラベル"] = view["権利確定月"].map(
-    lambda m: f"{int(m)}月" if pd.notna(m) else "—")
+# 配当がある月は配当履歴から出す（直近3年）。yfinance の exDividendDate は
+# 直近の1回しか返さず、3月決算の会社は9月しか見えないため。
+view["配当月"] = view["payout_months"].fillna("") if "payout_months" in view.columns else ""
 
 # ── フィルタ ──
 c1, c2, c3 = st.columns([1.1, 1.5, 1.6])
@@ -62,9 +58,9 @@ with c2:
 with c3:
     sectors = sorted(view["sector33"].dropna().unique())
     pick = st.multiselect("業種（33業種）", sectors, default=[])
-    month = st.selectbox("権利確定月", _MONTHS, index=0,
+    month = st.selectbox("配当がある月", _MONTHS, index=0,
                          help="配当の受け取りが特定の月に偏っているとき、"
-                              "空いている月に権利確定する銘柄を探すのに使います")
+                              "空いている月に配当がある銘柄を探すのに使います（直近3年の実績）")
     sort_by = st.selectbox("並び順", ["総合スコア", "配当継続スコア", "配当利回り",
                                    "自己利回り順位", "連続増配年数", "ヘム指数"])
 
@@ -82,7 +78,7 @@ if pick:
 if hem_only:
     f = f[f["hem_ratio"].fillna(0) >= config["scoring"]["hem_ratio_threshold"]]
 if month != "—":
-    f = f[f["権利確定月"] == int(month.replace("月", ""))]
+    f = f[f["配当月"].fillna("").str.contains(month, regex=False)]
 
 _SORT = {"総合スコア": "total", "配当継続スコア": "health", "配当利回り": "dividend_yield",
          "自己利回り順位": "yield_percentile", "連続増配年数": "streak", "ヘム指数": "hem_ratio"}
@@ -107,7 +103,7 @@ table = pd.DataFrame({
     "自己利回り順位": to_pct(f["yield_percentile"]).values,
     "連続増配": f["streak"].values,
     "DPS5年成長": to_pct(f["cagr_5y"]).values,
-    "権利確定": f["権利確定月ラベル"].values,
+    "配当月": f["配当月"].values,
     f"指値({default_target:.1%})": limit_price.round(0).values,
     "保有": f["保有"].values,
 })
@@ -137,7 +133,7 @@ event = st.dataframe(
                  "100%に近いほど自分史上まれに見る高利回り＝割安"),
         "連続増配": st.column_config.NumberColumn(format="%d 年"),
         "DPS5年成長": st.column_config.NumberColumn(format="%.1f%%", help="1株配当の5年の年率成長率"),
-        "権利確定": st.column_config.TextColumn(help="直近の権利確定日の月"),
+        "配当月": st.column_config.TextColumn(help="配当の権利が確定する月（直近3年の実績）"),
         f"指値({default_target:.1%})": st.column_config.NumberColumn(
             format="¥%d", help=f"直近の実績配当で利回り{default_target:.1%}に届く株価"),
     },

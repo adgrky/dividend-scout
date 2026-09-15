@@ -214,9 +214,33 @@ def score_valuation(df: pd.DataFrame, config: dict) -> tuple[pd.Series, dict]:
 
 # ──────────────────────────────── 合成 ────────────────────────────────
 
+def compute_health(df: pd.DataFrame, config: dict,
+                   trap_penalty: pd.Series | None = None) -> pd.DataFrame:
+    """配当継続スコアを、財務が取れている全銘柄について計算する。
+
+    ゲートを通った銘柄だけに付けると、保有114銘柄のうち83銘柄が空欄になり
+    「持っている株を評価する」という目的を果たせない。基準を外れている銘柄こそ
+    「どれくらい危ないのか」を数字で知りたい。
+
+    順位の母集団は「財務が取れている全銘柄」。ゲート通過銘柄だけを母集団にすると、
+    基準を外れた銘柄が全員100点満点の外側に出てしまい比較にならない。
+    """
+    pool = df[df["net_income"].notna() | df["equity_ratio"].notna()].copy()
+    if pool.empty:
+        return pd.DataFrame()
+    layers = {}
+    for name, fn in (("capacity", score_capacity), ("willingness", score_willingness),
+                     ("growth", score_growth)):
+        layers[name], _ = fn(pool, config)
+    lf = pd.DataFrame(layers)
+    penalty = (trap_penalty.reindex(pool.index).fillna(0.0)
+               if trap_penalty is not None else pd.Series(0.0, index=pool.index))
+    return pd.DataFrame({"health": (lf[HEALTH_LAYERS].mean(axis=1) - penalty).clip(lower=0.0)})
+
+
 def compute_scores(df: pd.DataFrame, config: dict, trap_penalty: pd.Series | None = None,
                    trap_detail: pd.Series | None = None) -> pd.DataFrame:
-    """ゲート通過銘柄にスコアを付ける。
+    """ゲート通過銘柄に発掘スコアを付ける。
 
     Parameters
     ----------
@@ -247,9 +271,6 @@ def compute_scores(df: pd.DataFrame, config: dict, trap_penalty: pd.Series | Non
     out = layers.copy()
     out["trap_penalty"] = penalty
     out["total"] = total
-    # 配当継続スコア：市場の評価（見過ごされ度・割安）を外し、
-    # 配当を出し続けられるか・出す気があるか・原資が伸びているか だけで測る。
-    out["health"] = (layers[HEALTH_LAYERS].mean(axis=1) - penalty).clip(lower=0.0)
     out["gate_passed"] = 1
 
     # 内訳は JSON にして丸ごと残す。カルテで「なぜこの点なのか」を全部見せるため。
@@ -266,7 +287,7 @@ def compute_scores(df: pd.DataFrame, config: dict, trap_penalty: pd.Series | Non
 
 
 _RAW_KEYS = ["dividend_yield", "yield_percentile", "dps_latest", "hem_ratio",
-             "policy_bonus", "edinet_years", "eps_cagr", "ex_dividend_date",
+             "policy_bonus", "edinet_years", "eps_cagr", "ex_dividend_date", "payout_months",
              "streak", "streak_no_cut",
              "cuts_10y", "cagr_5y", "cagr_10y", "payout_ratio", "fcf_cover",
              "net_cash_ratio", "net_debt_to_ocf", "equity_ratio", "roe", "per", "pbr",

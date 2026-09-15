@@ -178,6 +178,29 @@ def build_profile(ticker: str, div: pd.DataFrame) -> DividendProfile:
     )
 
 
+def payout_months(dividends: pd.DataFrame, years: int = 3) -> pd.Series:
+    """銘柄ごとの「配当がある月」を出す。
+
+    yfinance の exDividendDate は直近の1回しか返さないので、3月決算の会社は
+    9月（中間）しか出ず、期末の3月が見えない（実測で9月が479銘柄に偏った）。
+    受け取り月を平準化したいときに使うのだから、年間のパターンが要る。
+
+    Returns
+    -------
+    Series  index=ticker, value=月の集合（例 {3, 9}）
+    """
+    if dividends is None or dividends.empty:
+        return pd.Series(dtype=object)
+    d = dividends.copy()
+    d["date"] = pd.to_datetime(d["date"])
+    d = d[d["amount"] > 0]
+    if d.empty:
+        return pd.Series(dtype=object)
+    cutoff = d["date"].max() - pd.DateOffset(years=years)
+    d = d[d["date"] >= cutoff]
+    return d.groupby("ticker")["date"].apply(lambda s: sorted(set(s.dt.month)))
+
+
 def build_profiles(dividends: pd.DataFrame) -> dict[str, DividendProfile]:
     """全銘柄分をまとめて作る。dividends は ticker/date/amount の縦持ち。"""
     out: dict[str, DividendProfile] = {}

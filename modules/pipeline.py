@@ -19,7 +19,7 @@ import pandas as pd
 
 from modules import fundamentals as fnd
 from modules import scoring, traps
-from modules.dividend_history import build_profiles, profiles_to_frame
+from modules.dividend_history import build_profiles, payout_months, profiles_to_frame
 from modules.store import latest_scores, read_df, upsert_df  # noqa: F401  （後方互換のため再輸出）
 from modules.quality import trim_frame
 from modules.valuation import build_valuation_table
@@ -47,11 +47,16 @@ def load_base() -> pd.DataFrame:
 
     prof = profiles_to_frame(build_profiles(div))
     val = build_valuation_table(prices, div)
+    months = payout_months(div)
 
     df = uni.join(quotes, how="left").join(prof, how="left").join(
         val[["percentile", "median", "price_at_median_yield", "current"]]
         .rename(columns={"percentile": "yield_percentile", "median": "yield_median",
                          "current": "yield_ttm"}), how="left")
+
+    # 配当がある月（例 [3, 9]）。受け取り月の偏りを直すための検索に使う。
+    df["payout_months"] = df.index.map(months).map(
+        lambda v: "・".join(f"{m}月" for m in v) if isinstance(v, list) and v else "")
 
     today = pd.Timestamp(date.today())
     df["listing_years"] = (today - pd.to_datetime(df["listing_start"])).dt.days / 365.25
@@ -219,11 +224,14 @@ def run_scoring(config: dict, asof: str | None = None,
     if progress:
         progress(0.85, "スコア計算中...")
     scores = scoring.compute_scores(gated, config, penalty, labels)
+    # 配当継続スコアは、基準を外れた銘柄にも付ける（保有を評価するために要る）
+    health = scoring.compute_health(gated, config, penalty)
 
     out = gated[["gate_passed", "gate_reason"]].copy()
     out["gate_passed"] = out["gate_passed"].astype(int)
+    out["health"] = health["health"] if not health.empty else None
     for col in ["total", "capacity", "willingness", "growth", "neglect", "valuation",
-                "trap_penalty", "health", "detail_json"]:
+                "trap_penalty", "detail_json"]:
         out[col] = scores[col] if col in scores.columns else None
     out["asof"] = asof
     out = out.reset_index().rename(columns={"index": "ticker"})
@@ -232,7 +240,7 @@ def run_scoring(config: dict, asof: str | None = None,
     if progress:
         n = int(out["gate_passed"].sum())
         progress(1.0, f"完了：ゲート通過 {n} / {len(out)} 銘柄")
-    return gated.join(scores[["total", "health"] + scoring.LAYERS + ["trap_penalty"]],
-                      how="left")
+    return gated.join(scores[["total"] + scoring.LAYERS + ["trap_penalty"]], how="left") \
+                .join(health, how="left")
 
 
