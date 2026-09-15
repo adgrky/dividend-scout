@@ -112,6 +112,23 @@ _VERY_STALE_DAYS = 21
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def last_update_failed() -> str:
+    """直前の自動更新が失敗していたら、その内容を返す。
+
+    自動更新は裏で走るので、失敗しても気づけない。気づかないまま古い数字で
+    売買を決めるのがいちばん怖いので、画面に出す。
+    """
+    try:
+        r = read_df("SELECT kind, finished_at, note FROM scan_runs "
+                    "WHERE kind LIKE 'scheduled%' ORDER BY id DESC LIMIT 1")
+    except Exception:
+        return ""
+    if r.empty or r["kind"].iloc[0] != "scheduled_failed":
+        return ""
+    return f"{str(r['finished_at'].iloc[0])[:16]}　{r['note'].iloc[0]}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def data_asof() -> dict:
     """株価・スコア・相場それぞれの「いつ時点か」。"""
     from datetime import date as _d
@@ -152,6 +169,10 @@ def freshness_banner(sidebar: bool = True) -> None:
         st.rerun()
     days = a.get("_古さ", 0)
     where = st.sidebar if sidebar else st
+    ng = last_update_failed()
+    if ng:
+        where.error(f"⚠️ **前回の自動更新が失敗しています**\n\n{ng}\n\n"
+                    "**更新.command をダブルクリック**して手で更新してください。")
     detail = "　／　".join(f"{k} {v:%m/%d}" for k, v in a.items() if not k.startswith("_"))
     if days >= _VERY_STALE_DAYS:
         where.error(f"⚠️ **データが {days} 日前のものです**\n\n{detail}\n\n"

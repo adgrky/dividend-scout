@@ -34,13 +34,27 @@ else
 fi
 
 echo ""
-echo "  自動更新をオンにすると、こうなります。"
+echo "  自動更新をオンにすると、毎週土曜の朝9時に走ります。"
+echo "  中身は「古くなったものだけ」やるので、毎回10分で終わります。"
 echo ""
-echo "    ・毎週土曜の朝9時に、株価・配当・スコアを取り直す（約10分）"
+echo "    毎週   株価・配当・スコア   約10分   ← 毎回これだけ"
+echo "    月1回  会社の基本情報       約10分   （30日たっていたら足す）"
+echo "    年1回  有価証券報告書       約70分   （180日たっていて7月以降なら足す）"
+echo ""
 echo "    ・アプリを開いていなくても走る"
 echo "    ・その時刻に Mac が寝ていたら、次に起きたときに走る"
+echo "    ・Mac が2週間落ちていても、次に起きたとき足りないぶんが埋まる"
+echo "    ・手で更新している最中なら、重ならないように黙って降りる"
+echo "    ・失敗したらアプリの左に出る（気づかないまま古い数字を見ることはない）"
 echo "    ・結果は logs/weekly.log に残る"
 echo "    ・保有情報は外に出ません（このMacの中だけで完結）"
+echo ""
+echo "  【負担】"
+echo "    通信   毎週  yfinance に 38回（一括）＋ 財務を個別に数千回"
+echo "           年1回 EDINET から約 300MB（2回目以降はキャッシュを使う）"
+echo "    ディスク 毎週 4千行ほど増える（DBはいま 320MB）"
+echo "    CPU     1コアを2割ほど。ProcessType=Background なので"
+echo "            ほかの作業を邪魔しない優先度で走ります"
 echo ""
 echo "  どうしますか？"
 echo ""
@@ -64,7 +78,7 @@ case "$CHOICE" in
   <key>ProgramArguments</key>
   <array>
     <string>$APP_DIR/.venv/bin/python</string>
-    <string>$APP_DIR/scripts/weekly_scan.py</string>
+    <string>$APP_DIR/scripts/scheduled_update.py</string>
   </array>
   <key>WorkingDirectory</key><string>$APP_DIR</string>
   <key>StartCalendarInterval</key>
