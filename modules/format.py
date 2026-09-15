@@ -50,3 +50,15 @@ def after_tax(amount: float, account: str, config: dict) -> float:
 def csv_bytes(df: pd.DataFrame) -> bytes:
     """Excel で開いても文字化けしない CSV。"""
     return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def to_pct(s: "pd.Series | float", digits: int | None = None):
+    """0〜1 の小数を「パーセントの数値」に直す（0.0595 -> 5.95）。
+
+    Streamlit の column_config で format="%.2f%%" を指定しても、値を100倍しては
+    くれない。0.0595 をそのまま渡すと画面には "0.06%" と出る。
+    実際に 利回り・配当性向・DPS成長・損益率・YOC・構成比 の13箇所すべてが
+    100分の1で表示されていた。表に渡す前に必ずここを通すこと。
+    """
+    out = s * 100
+    return out.round(digits) if digits is not None and hasattr(out, "round") else out

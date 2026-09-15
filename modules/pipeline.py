@@ -66,6 +66,10 @@ def prescreen(df: pd.DataFrame, config: dict) -> pd.Index:
 
     ここで落とすのは、財務を見るまでもなく対象外と分かるものだけにする。
     財務が必要な条件（自己資本比率・配当性向など）はここでは判定しない。
+
+    保有とウォッチリストは条件に関係なく必ず含める。自分が持っている株を
+    評価できないアプリには意味がない（実測で保有114銘柄のうち57銘柄が
+    「財務未取得」のまま判定不能になっていた）。
     """
     g = config["gate"]
     ok = (
@@ -75,7 +79,10 @@ def prescreen(df: pd.DataFrame, config: dict) -> pd.Index:
         & (df["cuts_10y"].fillna(99) <= g["max_dividend_cuts_10y"])
         & (df["dps_latest"].fillna(0) > 0)
     )
-    return df.index[ok.fillna(False)]
+    selected = set(df.index[ok.fillna(False)])
+    mine = read_df("SELECT ticker FROM holdings UNION SELECT ticker FROM watchlist")["ticker"]
+    selected |= set(mine) & set(df.index)
+    return pd.Index(sorted(selected))
 
 
 def fetch_fundamentals(tickers, progress: ProgressFn | None = None,

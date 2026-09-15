@@ -90,7 +90,9 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
             "利回り": r.get("dividend_yield"),
             "年間配当": amount * (r.get("dividend_yield") or 0),
             "スコア": r.get("total"),
-            "理由": _reason(r, sector, used, cap_sector * total_after),
+            "自己利回り順位": r.get("yield_percentile"),
+            "連続増配": r.get("streak"),
+            "業種の空き枠": max(cap_sector * total_after - used, 0.0),
         })
         remaining -= amount
 
@@ -98,18 +100,6 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
     if not out.empty:
         out.attrs["残り"] = remaining
     return out
-
-
-def _reason(r: pd.Series, sector, used: float, cap: float) -> str:
-    bits = [f"スコア {r.get('total', float('nan')):.0f}"]
-    yp = r.get("yield_percentile")
-    if pd.notna(yp):
-        bits.append(f"自己利回り上位 {yp:.0%}")
-    streak = r.get("streak")
-    if pd.notna(streak) and streak:
-        bits.append(f"連続増配 {int(streak)}年")
-    bits.append(f"{sector} の枠に余裕 {(cap - used) / 1e4:,.0f}万円")
-    return " / ".join(bits)
 
 
 def rebalance_funds(review: pd.DataFrame) -> float:

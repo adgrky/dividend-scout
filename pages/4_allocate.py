@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from modules.allocator import allocate, rebalance_funds
-from modules.format import yen, yen_short
+from modules.format import to_pct, yen, yen_short
 from modules.portfolio import review_candidates, sector_exposure
 from modules.store import read_df
 from modules.ui import get_config, get_positions, get_scores, no_data_guard
@@ -32,6 +32,10 @@ with c3:
                         format="%d%%") / 100
 with c4:
     scope = st.radio("対象", ["未保有のみ", "保有の買い増しも含む"], index=1)
+    # インカム目的の口座なので、利回りの下限は必須。これが無いと
+    # スコアは高いが利回り1.2% といった銘柄に資金が入ってしまう。
+    min_yield = st.number_input("最低利回り（%）", 0.0, 8.0, 3.0, 0.25,
+                                help="これを下回る銘柄には資金を入れない") / 100
 
 require_target = st.checkbox(
     "目標利回りに届いている銘柄だけに絞る", value=False,
@@ -55,6 +59,7 @@ cand = pd.concat([cand, raw[["dividend_yield", "yield_percentile", "streak"]]], 
 
 if scope == "未保有のみ":
     cand = cand[~cand["ticker"].isin(held)]
+cand = cand[cand["dividend_yield"].fillna(0) >= min_yield]
 
 targets = read_df("SELECT ticker, target_yield FROM watchlist "
                   "UNION SELECT ticker, target_yield FROM holdings").groupby("ticker").first()
@@ -74,17 +79,28 @@ else:
     c2.metric("増える年間配当（税引前）", yen(total_div))
     c3.metric("残り", yen(cash - total_in))
 
+    show = plan[["コード", "銘柄名", "業種", "株価", "株数", "投入額", "利回り",
+                 "年間配当", "スコア", "自己利回り順位", "連続増配", "業種の空き枠"]].copy()
+    show["利回り"] = to_pct(show["利回り"])
+    show["自己利回り順位"] = to_pct(show["自己利回り順位"])
+    show["業種の空き枠"] = (show["業種の空き枠"] / 1e4).round(0)
     st.dataframe(
-        plan[["コード", "銘柄名", "業種", "株価", "株数", "投入額", "利回り", "年間配当", "スコア", "理由"]],
-        hide_index=True, width="stretch",
+        show, hide_index=True, width="stretch",
         column_config={
             "株価": st.column_config.NumberColumn(format="¥%d"),
             "投入額": st.column_config.NumberColumn(format="¥%d"),
             "年間配当": st.column_config.NumberColumn(format="¥%d"),
             "利回り": st.column_config.NumberColumn(format="%.2f%%"),
             "スコア": st.column_config.NumberColumn(format="%.0f"),
+            "自己利回り順位": st.column_config.ProgressColumn(
+                format="%.0f%%", min_value=0, max_value=100,
+                help="その銘柄自身の過去7年の利回り分布の中での位置"),
+            "連続増配": st.column_config.NumberColumn(format="%d 年"),
+            "業種の空き枠": st.column_config.NumberColumn(
+                format="%d 万円", help="この業種にあと何円まで入れられるか（構成比20%が上限）"),
         })
-    st.caption("株数は単元（100株）に丸めています。")
+    st.caption("株数は単元（100株）に丸めています。"
+               "スコアが高い順に、業種の上限と1銘柄あたりの上限を守りながら埋めています。")
 
 st.divider()
 st.subheader("整理を検討する保有")
@@ -92,12 +108,14 @@ if review.empty:
     st.success("基準を外れた保有はありません")
 else:
     st.caption("売るかどうかはケンが決める。ここは材料を並べるだけ。")
+    rev = review[["code", "name", "sector33", "account", "shares", "eval_value",
+                  "pnl_pct", "total", "整理を検討する理由"]].rename(columns={
+        "code": "コード", "name": "銘柄名", "sector33": "業種", "account": "口座",
+        "shares": "株数", "eval_value": "評価額", "pnl_pct": "損益率", "total": "スコア"}).copy()
+    rev["損益率"] = to_pct(rev["損益率"])
+    rev["口座"] = rev["口座"].map({"specific": "特定", "nisa": "NISA"}).fillna(rev["口座"])
     st.dataframe(
-        review[["ticker", "name", "sector33", "account", "shares", "eval_value",
-                "pnl_pct", "total", "整理を検討する理由"]].rename(columns={
-            "ticker": "銘柄", "name": "銘柄名", "sector33": "業種", "account": "口座",
-            "shares": "株数", "eval_value": "評価額", "pnl_pct": "損益率", "total": "スコア"}),
-        hide_index=True, width="stretch", height=400,
+        rev, hide_index=True, width="stretch", height=400,
         column_config={
             "評価額": st.column_config.NumberColumn(format="¥%d"),
             "損益率": st.column_config.NumberColumn(format="%.1f%%"),
@@ -108,6 +126,8 @@ st.divider()
 st.subheader("業種の空き枠")
 exposure = sector_exposure(positions, config)
 if not exposure.empty:
+    exposure = exposure.rename(columns={"sector33": "業種"}).copy()
+    exposure["構成比"] = to_pct(exposure["構成比"])
     st.dataframe(exposure, hide_index=True, width="stretch", height=400,
                  column_config={
                      "評価額": st.column_config.NumberColumn(format="¥%d"),

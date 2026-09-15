@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from modules.format import to_pct
 from modules.store import read_df
 from modules.validation import (Cohort, OUTCOMES, TESTABLE_FACTORS, benchmark,
                                 composite_test, factor_power, quintile_table, run_cohort)
@@ -100,23 +101,28 @@ with tab2:
     if t.empty:
         st.caption("データが足りません")
     else:
-        fig = go.Figure(go.Bar(x=t["分位"].astype(str), y=t["平均"] * 100,
+        fig = go.Figure(go.Bar(x=t["分位"].astype(str), y=to_pct(t["中央値"]),
                                marker_color="#4C8BF5"))
         fig.update_layout(height=320, yaxis_title=f"{outcome_label}（%）",
                           margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, width="stretch")
-        st.dataframe(t, hide_index=True, width="stretch")
+        tv = t.copy()
+        for col in ("平均", "中央値"):
+            tv[col] = to_pct(tv[col])
+        st.dataframe(tv, hide_index=True, width="stretch",
+                     column_config={"平均": st.column_config.NumberColumn(format="%.1f%%"),
+                                    "中央値": st.column_config.NumberColumn(format="%.1f%%")})
         st.caption("Q5 が最上位。Q1→Q5 で単調に上がっていれば本物の可能性がある。"
                    "途中で山や谷があるなら、たまたま。")
 
 with tab3:
-    bench = benchmark(allc)
+    bench = benchmark(allc).copy()
+    pct_cols = ["リターン中央値", "リターン平均（裾を刈る）", "DPS成長 中央値", "減配発生率"]
+    for col in pct_cols:
+        bench[col] = to_pct(bench[col])
     st.dataframe(bench, hide_index=True, width="stretch",
-                 column_config={
-                     "トータルリターン": st.column_config.NumberColumn(format="%.1f%%"),
-                     "DPS成長": st.column_config.NumberColumn(format="%.1f%%"),
-                     "減配発生率": st.column_config.NumberColumn(format="%.1f%%"),
-                 })
+                 column_config={c: st.column_config.NumberColumn(format="%.1f%%")
+                                for c in pct_cols})
     st.caption("スコアがこれらに勝てないなら、複雑なスコアを使う理由がない。")
 
 with tab4:
@@ -129,5 +135,10 @@ with tab4:
         test = pd.concat([frames[y] for y in ys[half:]], ignore_index=True)
         st.caption(f"学習: {ys[:half]} → 検証: {ys[half:]}　"
                    "全期間の最良値でチューニングすると、後から何の意味もない数字が出てくる。")
-        res = composite_test(train, test, outcome=outcome_col)
-        st.dataframe(res, hide_index=True, width="stretch")
+        res = composite_test(train, test, outcome=outcome_col).copy()
+        for col in res.columns:
+            if res[col].dtype.kind == "f":
+                res[col] = to_pct(res[col])
+        st.dataframe(res, hide_index=True, width="stretch",
+                     column_config={c: st.column_config.NumberColumn(format="%.1f%%")
+                                    for c in res.columns if res[c].dtype.kind == "f"})

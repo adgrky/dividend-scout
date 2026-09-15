@@ -123,14 +123,25 @@ with c1:
     target = st.number_input("目標利回り（%）", 1.0, 12.0, default_target * 100, 0.1) / 100
     dps = prof["dps_latest"]
     limit_price = price_for_target_yield(dps, target)
-    st.metric("指値", yen(limit_price))
     now_price = row.get("last_close")
+    st.metric(f"利回り {target:.1%} に届く株価", yen(limit_price))
+
+    # 指値が現在値より高い＝すでに目標を超えている、という関係が直感に反するので
+    # 数字だけでなく「買っていいのか待つのか」を文で言い切る。
     if limit_price and now_price:
         gap = limit_price / now_price - 1
-        st.caption(f"現在値から {gap:+.1%}")
+        if gap >= 0:
+            st.success(f"**すでに目標利回りを超えている**（現在 {raw.get('dividend_yield', 0):.2%}）。"
+                       f"¥{limit_price:,.0f} までなら買っても目標に届く（現在値の {gap:+.1%}）")
+        else:
+            st.info(f"**まだ目標に届いていない**（現在 {raw.get('dividend_yield', 0):.2%}）。"
+                    f"¥{limit_price:,.0f} まで {-gap:.1%} 下がるのを待つ")
+
     if info.get("price_at_median_yield"):
-        st.metric("過去中央値の利回りまで戻った場合の株価",
-                  yen(info["price_at_median_yield"]))
+        st.metric("過去の平均的な水準に戻った場合の株価",
+                  yen(info["price_at_median_yield"]),
+                  help="いまの配当のまま、利回りが過去7年の中央値まで下がった（＝株価が戻った）"
+                       "場合の株価。狙いの目標ではなく、上値の目安として見るもの")
 
 with c2:
     ys = yield_series(prices, div)
