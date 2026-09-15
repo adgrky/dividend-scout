@@ -49,6 +49,10 @@ SEVERITY = {
 }
 SEVERITY_ORDER = list(SEVERITY)
 
+# 指標に5つ並べると「🟡 監視を強…」と切れるので、短い見出しも持っておく
+SHORT = {"売却を検討": "売却", "監視を強める": "監視", "利確を検討": "利確",
+         "手入れ": "手入れ", "判定待ち": "判定待ち"}
+
 # 営業CF・FCF・有利子負債の基準を当てない業種。
 # 銀行は貸出が増えると営業CFがマイナスになり、保険は責任準備金で歪む。
 _FINANCIAL = {"銀行業", "保険業", "証券、商品先物取引業", "その他金融業"}
@@ -283,9 +287,9 @@ def _row(r: pd.Series, sev: str, found: list[tuple[str, str, str]],
             "pnl_pct": r.get("pnl_pct"), "health": r.get("health"),
             "streak": r.get("streak"), "dps_latest": r.get("dps_latest"),
             "target_yield": r.get("target_yield"), "構成比": share, "重さ": sev, "印": mark,
-            "理由": "\n".join(f"・{a}" for a, _, _ in found),
-            "根拠": "\n".join(f"・{b}" for _, b, _ in found),
-            "やること": "\n".join(f"・{c}" for _, _, c in found),
+            "理由": "\n".join(f"- {a}" for a, _, _ in found),
+            "根拠": "\n".join(f"- {b}" for _, b, _ in found),
+            "やること": "\n".join(f"- {c}" for _, _, c in found),
             "件数": len(found), "整理の優先度": 0.0,
         }
     # 同じ重さの中では、金額が大きいものと、含み損で税金がかからないものを先に。
@@ -302,9 +306,11 @@ def _row(r: pd.Series, sev: str, found: list[tuple[str, str, str]],
         "dps_latest": r.get("dps_latest"), "target_yield": r.get("target_yield"),
         "構成比": share,
         "重さ": sev, "印": mark,
-        "理由": "\n".join(f"・{a}" for a, _, _ in found),
-        "根拠": "\n".join(f"・{b}" for _, b, _ in found),
-        "やること": "\n".join(f"・{c}" for _, _, c in found),
+        # Markdown の箇条書きにする。「・」＋改行1つだと Markdown が
+        # 1行に潰してしまい、複数の理由がつながって読めなくなる。
+        "理由": "\n".join(f"- {a}" for a, _, _ in found),
+        "根拠": "\n".join(f"- {b}" for _, b, _ in found),
+        "やること": "\n".join(f"- {c}" for _, _, c in found),
         "件数": len(found),
         "整理の優先度": round(min(prio, 100.0), 0),
     }

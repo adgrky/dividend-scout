@@ -38,8 +38,9 @@ c4, c5, c6 = st.columns(3)
 c4.metric("年間配当（税引前）", yen_short(annual_div))
 c5.metric("年間配当（税引後）", yen_short(annual_div_at),
           help="NISAは非課税、特定口座は20.315%を引いています")
-c6.metric("YOC（取得額に対する利回り）", pct(annual_div / total_cost) if total_cost else "—",
-          help="いまの年間配当 ÷ 買ったときの金額。増配で育つとここが上がります")
+c6.metric("YOC", pct(annual_div / total_cost) if total_cost else "—",
+          help="取得額に対する利回り。いまの年間配当 ÷ 買ったときの金額。"
+               "増配で育つとここが上がります")
 
 n_ok = int((positions["gate_passed"] == 1).sum())
 st.caption(f"保有 {len(positions)} 銘柄 ／ 1銘柄あたり平均 {yen_short(total_eval / len(positions))}"
@@ -218,7 +219,8 @@ with tab6:
         soon = m[m["あと何日"] <= 30]
         c1, c2, c3 = st.columns(3)
         c1.metric("30日以内に権利落ち", f"{len(soon)} 銘柄")
-        c2.metric("その受取見込み（税引前）", yen(soon["受取見込み"].sum()))
+        c2.metric("その受取見込み", yen(soon["受取見込み"].sum()),
+                  help="30日以内に権利落ちする銘柄の配当の合計（税引前）")
         # 「2026-09-30（あと15日）」だと幅が足りず「あと 1…」と切れる。
         # 日付を値に、日数は下の差分に回す。
         c3.metric("いちばん近い日", str(m["次の権利落ち日"].iloc[0]),
@@ -265,7 +267,8 @@ with tab4:
     if not got.empty:
         this_year = got[got["年"] == date.today().year]
         c1, c2, c3 = st.columns(3)
-        c1.metric(f"{date.today().year}年の受取（税引後）", yen(this_year["受取額"].sum()))
+        c1.metric(f"{date.today().year}年の受取", yen(this_year["受取額"].sum()),
+                  help="税引後の手取り額の合計")
         c2.metric("累計の受取", yen(got["受取額"].sum()))
         c3.metric("記録件数", f"{len(got)} 件")
 

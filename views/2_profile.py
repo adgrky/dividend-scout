@@ -60,8 +60,9 @@ edinet = read_df("SELECT * FROM edinet_summary WHERE ticker = ? ORDER BY fiscal_
 c1, c2, c3 = st.columns(3)
 c1.metric("株価", yen(row.get("last_close")))
 c2.metric("利回り（実績）", pct(raw.get("dividend_yield"), 2))
-c3.metric("連続増配 ／ 10年の減配",
-          f"{int(prof['streak'])} 年 ／ {int(prof['cuts_10y'])} 回")
+c3.metric("連続増配 ／ 減配",
+          f"{int(prof['streak'])} 年 ／ {int(prof['cuts_10y'])} 回",
+          help="左が連続増配年数、右が直近10年の減配回数")
 
 c4, c5, c6 = st.columns(3)
 c4.metric("発掘スコア", f"{row['total']:.1f}" if pd.notna(row["total"]) else "—",
@@ -377,7 +378,8 @@ with c1:
     dps = prof["dps_latest"]
     limit_price = price_for_target_yield(dps, target)
     now_price = row.get("last_close")
-    st.metric(f"利回り {target:.1%} に届く株価", yen(limit_price))
+    st.metric(f"利回り {target:.1%} の株価", yen(limit_price),
+              help="いまの1株配当のまま、この利回りになる株価。指値の目安")
     if limit_price and now_price:
         gap = limit_price / now_price - 1
         if gap >= 0:
@@ -387,7 +389,7 @@ with c1:
             st.info(f"**まだ目標に届いていません**（現在 {raw.get('dividend_yield', 0):.2%}）。\n\n"
                     f"¥{limit_price:,.0f} まで {-gap:.1%} 下がるのを待ちます。")
     if info.get("price_at_median_yield"):
-        st.metric("いつもの水準に戻った場合の株価", yen(info["price_at_median_yield"]),
+        st.metric("いつもの水準の株価", yen(info["price_at_median_yield"]),
                   help="いまの配当のまま、利回りが過去7年の中央値まで下がった場合の株価。"
                        "狙う目標ではなく、上値の目安として見ます")
 
@@ -404,7 +406,7 @@ with c2:
     nx = get_next_ex_dates((ticker,))
     if not nx.empty:
         r0 = nx.iloc[0]
-        st.metric("次の権利落ち日（予測）",
+        st.metric("次の権利落ち日",
                   f"{r0['次の権利落ち日']}（あと {int(r0['あと何日'])} 日）",
                   help="この日までに買って持っていれば、その回の配当を受け取れます。"
                        "yfinance の権利確定日は1,272社中5社しか入っていないため、"

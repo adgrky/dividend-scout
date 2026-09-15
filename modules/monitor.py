@@ -106,7 +106,7 @@ def build_alerts(config: dict) -> pd.DataFrame:
         if pd.notna(r.get("growth_latest")) and r["growth_latest"] < -0.001:
             extra = ""
             if broken is not None and "減配" in broken["理由"]:
-                extra = "　／　" + broken["根拠"].splitlines()[0].lstrip("・")
+                extra = "　／　" + broken["根拠"].splitlines()[0].lstrip("- ")
             add(ticker, "high", "dividend_cut",
                 f"{name}: 配当が前年比 {r['growth_latest']:.1%}"
                 f"（{r['dps_prev']:.1f} → {r['dps_latest']:.1f}円）{extra}")
@@ -117,7 +117,7 @@ def build_alerts(config: dict) -> pd.DataFrame:
         # 「監視は買い場、整理は売れ」という矛盾が起きる（実測で6銘柄あった）。
         # 「採用基準を外れた」はそれだけでは異変ではない。新規で買わない理由であって、
         # 持っている株を手放す理由ではないから（実測で160件中99件がこれだった）。
-        lead = broken["理由"].splitlines()[0].lstrip("・") if broken is not None else ""
+        lead = broken["理由"].splitlines()[0].lstrip("- ") if broken is not None else ""
         if cut_fired and lead.startswith("直近の配当年度で減配した"):
             pass                       # 上の減配アラートと同じ出来事なので出さない
         elif broken is not None and broken["重さ"] == "売却を検討":
@@ -157,7 +157,7 @@ def build_alerts(config: dict) -> pd.DataFrame:
             if penalty >= max_trap:
                 blocked.append(f"高配当トラップの減点 {penalty:.0f}")
             if broken is not None and broken["重さ"] in ("売却を検討", "監視を強める"):
-                blocked.append(broken["理由"].splitlines()[0].lstrip("・"))
+                blocked.append(broken["理由"].splitlines()[0].lstrip("- "))
             if blocked:
                 add(ticker, "medium", "yield_trap",
                     head + " — ただし買ってはいけない：" + " / ".join(blocked))

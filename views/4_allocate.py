@@ -82,12 +82,12 @@ with tab_market:
                "現金を残しておき、下がるほど多く入れるための材料です。")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("日経平均", f"{snap.get('nikkei', 0):,.0f} 円" if snap.get("nikkei") else "—")
-    c2.metric("日経平均PBR（加重平均）", f"{snap.get('pbr', 0):.2f} 倍" if snap.get("pbr") else "—",
+    c2.metric("日経平均PBR", f"{snap.get('pbr', 0):.2f} 倍" if snap.get("pbr") else "—",
               help="株価が1株純資産の何倍か。リーマン・ショックのときは0.8倍まで下がりました")
     c3.metric("過去10年での位置",
               f"上位 {1 - snap['pct_10y']:.0%}" if snap.get("pct_10y") is not None else "—",
               help="日経平均が、過去10年の分布の中でどのあたりか")
-    c4.metric("200日移動平均との差",
+    c4.metric("200日線との差",
               f"{snap['vs_ma200']:+.1%}" if snap.get("vs_ma200") is not None else "—")
 
     color = {"総力戦": "error", "大人買い": "error", "買い増し": "success",
@@ -226,8 +226,9 @@ with tab_buy:
         leftover = cash - total_in             # 単元に丸めきれず余ったぶん
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("投入額", yen(total_in))
-        c2.metric("増える年間配当（税引前）", yen(total_div))
-        c3.metric("増える年間配当（税引後）", yen(total_div * (1 - tax)))
+        c2.metric("増える配当／年", yen(total_div), help="税引前")
+        c3.metric("税引後", yen(total_div * (1 - tax)),
+                  help="NISAは非課税、特定口座は20.315%を引いています")
         c4.metric("残る現金", yen(cash_in - total_in),
                   help="暴落用に取っておくぶんと、単元に丸めて余ったぶんの合計")
 
@@ -420,7 +421,9 @@ with tab_sell:
         "判定待ち": "財務や配当性向がまだ取れていないもの。判定していません",
     }
     for col, k in zip(cs, SR.SEVERITY_ORDER):
-        col.metric(f"{SR.SEVERITY[k][0]} {k}", counts[k], help=_HELP[k])
+        # 5つ横に並ぶので見出しは短く。正式名は説明に入れる
+        col.metric(f"{SR.SEVERITY[k][0]} {SR.SHORT[k]}", counts[k],
+                   help=f"**{k}** — {_HELP[k]}")
 
     with st.expander("なぜこの基準なのか（買う基準をそのまま使わない理由）"):
         st.markdown("""
@@ -497,21 +500,25 @@ with tab_sell:
         m = st.columns(5)
         m[0].metric("株数", f"{r['shares']:,.0f} 株")
         m[1].metric("株価", yen(r["last_close"]))
-        m[2].metric("評価額", yen(r["eval_value"]))
+        # 5列に詰めると「¥190,…」と切れるので、金額は短縮表記にして正確な額は説明へ
+        m[2].metric("評価額", yen_short(r["eval_value"]), help=yen(r["eval_value"]))
         m[3].metric("損益", f"{r['pnl_pct']:+.1%}" if pd.notna(r["pnl_pct"]) else "—",
-                    yen((r["last_close"] - (r["avg_cost"] or 0)) * r["shares"]))
-        m[4].metric("配当継続スコア",
-                    f"{r['health']:.0f}" if pd.notna(r["health"]) else "—",
-                    help="配当が続くか・増えるかだけを見た点数。50が真ん中")
+                    yen_short((r["last_close"] - (r["avg_cost"] or 0)) * r["shares"]),
+                    help=f"取得単価 {yen(r['avg_cost'])} → 株価 {yen(r['last_close'])}")
+        m[4].metric("配当継続", f"{r['health']:.0f}" if pd.notna(r["health"]) else "—",
+                    help="配当継続スコア。配当が続くか・増えるかだけを見た点数。50が真ん中")
 
         box = {"売却を検討": st.error, "監視を強める": st.warning,
                "利確を検討": st.success, "手入れ": st.info,
                "判定待ち": st.info}[r["重さ"]]
         box(f"**{r['重さ']}**\n\n{r['理由']}")
-        st.markdown("**根拠になっている数字**")
-        st.code(r["根拠"], language=None)
-        st.markdown("**どうするか**")
-        st.markdown(r["やること"])
+        c_a, c_b = st.columns(2)
+        with c_a:
+            st.markdown("**根拠になっている数字**")
+            st.markdown(r["根拠"])
+        with c_b:
+            st.markdown("**どうするか**")
+            st.markdown(r["やること"])
         if r["判断"]:
             st.caption(f"→ すでに「{r['判断']}」と記録しています（{r['判断日']}）")
 
@@ -577,7 +584,7 @@ with tab_sell:
             "評価額": shown["eval_value"].values,
             "損益率": to_pct(shown["pnl_pct"]).values,
             "配当継続": shown["health"].round(0).values,
-            "理由": shown["理由"].str.replace("\n", " ／ ").str.lstrip("・").values,
+            "理由": shown["理由"].str.replace("\n- ", " ／ ").str.lstrip("- ").values,
             "判断": shown["判断"].values,
         })
         st.dataframe(v, hide_index=True, width="stretch", height=520, column_config={

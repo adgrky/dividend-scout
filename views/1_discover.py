@@ -205,7 +205,7 @@ if sel:
     b1, b2 = c2.columns(2)
     if b1.button("📄 カルテ", type="primary", width="stretch"):
         st.session_state["profile_ticker"] = picked["ticker"]
-        st.switch_page("pages/2_profile.py")
+        st.switch_page("views/2_profile.py")
     if b2.button("⭐ 監視に追加", width="stretch",
                  help="ウォッチリストに入れると、監視タブが減配や指値到達を見張ります"):
         from modules.store import connect
