@@ -22,7 +22,7 @@ import streamlit as st
 from modules import market, review as R, sell_rules as SR
 from modules.allocator import allocate, buy_gate, buy_priority, month_gaps
 from modules.format import to_pct, yen, yen_short
-from modules.portfolio import dividend_calendar, freed_cash
+from modules.portfolio import dividend_calendar, dividend_cash, freed_cash
 from modules.store import connect, read_df
 from modules.ui import flash, show_flash, get_config, get_positions, get_scores, no_data_guard
 
@@ -158,6 +158,8 @@ with tab_buy:
     # ── 整理して生まれたお金を、そのまま次の買い付けに回せるようにする ──
     # 売ったあとに金額を手で足し算して打ち直すのでは、この使い方は続かない。
     freed = freed_cash(30)
+    # 受け取った配当も買い付けの原資。再投資しないと「育つ」にならない。
+    dcash = dividend_cash(90)
     if freed["残り"] > 0:
         st.success(
             f"🔁 **整理して生まれた余力が {yen(freed['残り'])} 残っています**"
@@ -173,6 +175,12 @@ with tab_buy:
             "整理で生まれた余力（円）", 0, 100_000_000, int(freed["残り"]), 10_000, format="%d",
             help="持ち株を整理して作ったお金。**相場の水準による絞り込みはかけません**。"
                  "同じ市場の中で乗り換えるだけで、新しく市場に踏み込むわけではないからです")
+        div_in = st.number_input(
+            "受け取った配当（円）", 0, 100_000_000, int(dcash["受取額"]), 1_000, format="%d",
+            help=f"直近90日に受け取った配当（税引後）の合計。"
+                 f"いま {dcash['件数']} 件・{yen(dcash['受取額'])} 記録されています。"
+                 "**再投資しないと配当は育ちません。**"
+                 "相場の水準による絞り込みはかけません")
         account = st.radio("入れる口座", ["specific", "nisa"], index=0,
                            format_func=lambda a: "特定口座（課税 20.315%）" if a == "specific"
                            else "NISA（非課税）",
@@ -214,18 +222,29 @@ with tab_buy:
     # 整理して作ったお金は、同じ市場の中で乗り換えるだけなので絞らない。
     # ここを一緒くたに絞ると、整理するたびに市場から少しずつ降りることになる。
     cash_from_deposit = cash_in * (deploy_ratio if use_regime else 1.0)
-    cash = cash_from_deposit + swap_in
+    # 整理で作ったお金と受け取った配当は、すでに市場の中にあるお金なので絞らない
+    cash = cash_from_deposit + swap_in + div_in
     if use_regime and deploy_ratio < 1.0 and cash_in > 0:
         msg = (f"【{regime_name}】のため、入金 {yen(cash_in)} のうち "
                f"**{yen(cash_from_deposit)}** を投入し、"
                f"**{yen(cash_in - cash_from_deposit)}** は暴落用の現金に積みます。")
+        extra = []
         if swap_in > 0:
-            msg += (f"\n\n整理で作った {yen(swap_in)} は**そのまま全額**入れます"
-                    "（乗り換えなので絞りません）。合わせて **" + yen(cash) + "** を配ります。")
+            extra.append(f"整理で作った {yen(swap_in)}")
+        if div_in > 0:
+            extra.append(f"受け取った配当 {yen(div_in)}")
+        if extra:
+            msg += ("\n\n" + "・".join(extra) + " は**そのまま全額**入れます"
+                    "（すでに市場の中にあるお金なので絞りません）。"
+                    f"合わせて **{yen(cash)}** を配ります。")
         st.info(msg)
-    elif swap_in > 0:
-        st.info(f"入金 {yen(cash_from_deposit)} ＋ 整理で作った {yen(swap_in)} "
-                f"＝ **{yen(cash)}** を配ります。")
+    elif swap_in > 0 or div_in > 0:
+        parts = [f"入金 {yen(cash_from_deposit)}"]
+        if swap_in > 0:
+            parts.append(f"整理で作った {yen(swap_in)}")
+        if div_in > 0:
+            parts.append(f"受け取った配当 {yen(div_in)}")
+        st.info(" ＋ ".join(parts) + f" ＝ **{yen(cash)}** を配ります。")
 
     held = set(positions["ticker"]) if not positions.empty else set()
     cand = scores[scores["gate_passed"] == 1].copy().reset_index(drop=True)
@@ -265,14 +284,18 @@ with tab_buy:
         c2.metric("増える配当／年", yen(total_div), help="税引前")
         c3.metric("税引後", yen(total_div * (1 - tax)),
                   help="NISAは非課税、特定口座は20.315%を引いています")
-        c4.metric("残る現金", yen(cash_in + swap_in - total_in),
+        c4.metric("残る現金", yen(cash_in + swap_in + div_in - total_in),
                   help="暴落用に取っておくぶんと、単元に丸めて余ったぶんの合計")
 
         # 内訳を必ず出す。合計だけ出していたときは「入金50万・投入枠30万」と
         # 言いながら「現金に積む 40万」と表示され、何が起きているか分からなかった。
         unit_word = "1株の端数" if lot == 1 else "単元（100株）に丸めた端数"
-        src = (f"**入金 {yen(cash_in)}**" if swap_in == 0 else
-               f"**入金 {yen(cash_in)} ＋ 整理で作った {yen(swap_in)}**")
+        bits = [f"入金 {yen(cash_in)}"]
+        if swap_in > 0:
+            bits.append(f"整理で作った {yen(swap_in)}")
+        if div_in > 0:
+            bits.append(f"受け取った配当 {yen(div_in)}")
+        src = "**" + " ＋ ".join(bits) + "**"
         st.caption(
             f"{src}　＝　投入 {yen(total_in)}　＋　"
             f"暴落用に取っておく {yen(reserve_part)}（【{regime_name}】のため入金の "

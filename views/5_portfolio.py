@@ -8,6 +8,7 @@ import streamlit as st
 from datetime import date
 
 from modules.format import pct, to_pct, yen, yen_short
+from modules import income_risk as IR
 from modules.portfolio import (dividend_calendar, dividends_received,
                                expected_dividends, record_equity, sector_exposure)
 from modules.store import connect, read_df
@@ -50,8 +51,9 @@ st.caption(f"保有 {len(positions)} 銘柄 ／ 1銘柄あたり平均 {yen_shor
 # インカム投資の目的は「配当が育つこと」なので、推移が見えないと成果が分からない。
 record_equity(positions, config)
 
-tab1, tab2, tab3, tab6, tab4, tab5 = st.tabs(
-    ["保有一覧", "業種の配分", "配当月", "次の権利落ち日", "配当の受取記録", "推移"])
+tab1, tab7, tab2, tab3, tab6, tab4, tab5 = st.tabs(
+    ["保有一覧", "配当の強さ", "業種の配分", "配当月", "次の権利落ち日",
+     "配当の受取記録", "推移"])
 
 with tab1:
     edit_mode = st.toggle("株数と取得単価を直す", value=False,
@@ -149,6 +151,146 @@ with tab1:
         st.download_button("保有一覧をCSVで保存",
                            view.to_csv(index=False).encode("utf-8-sig"),
                            f"保有一覧_{date.today():%Y%m%d}.csv", "text/csv")
+
+with tab7:
+    st.caption("**評価額の分散と、配当の分散は別物です。** "
+               "検証で「最良の選び方でも5年で54.7%が減配する」と出ました。"
+               "選別では防ぎきれないので、**起きたときにどれだけ減るか**を見ます。")
+
+    conc = IR.concentration(positions)
+    if not conc:
+        st.info("配当のデータがありません。")
+    else:
+        # 4つ横に並べると見出しが切れるので、3つに絞って言葉も短くする
+        eff = conc["実質の分散銘柄数"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("配当が出ている銘柄",
+                  f"{conc['配当が出ている銘柄数']} / {conc['銘柄数']}",
+                  help="保有していても無配の銘柄は、インカムには効いていません")
+        c2.metric("実質の分散", f"{eff:.1f} 銘柄",
+                  f"見かけより {conc['配当が出ている銘柄数'] - eff:.0f} 少ない",
+                  delta_color="off",
+                  help="1 ÷ Σ(配当の構成比²)。50銘柄あっても1銘柄に半分が寄っていれば、"
+                       "実質は数銘柄ぶんにしかなりません")
+        c3.metric("上位5／上位10",
+                  f"{conc['上位5の割合']:.0%} ／ {conc['上位10の割合']:.0%}",
+                  help="年間配当のうち、上位5銘柄／上位10銘柄から出ている割合")
+
+        ratio = eff / max(conc["配当が出ている銘柄数"], 1)
+        if ratio < 0.35:
+            st.warning(f"**配当が偏っています。** {conc['配当が出ている銘柄数']} 銘柄から"
+                       f"配当が出ていますが、偏りを考えると **実質 {eff:.0f} 銘柄ぶん** "
+                       "の分散しかありません。上位の銘柄が減配すると、インカム全体が大きく揺れます。")
+        else:
+            st.success(f"配当の分散は効いています（実質 {eff:.0f} 銘柄ぶん）。")
+
+        src = conc["内訳"]
+        names = positions.groupby("ticker")["name"].first()
+        codes = positions.groupby("ticker")["code"].first()
+        topn = src.head(15)
+        fig = go.Figure(go.Bar(
+            x=[f"{codes.get(t,'')} {str(names.get(t,t))[:8]}" for t in topn.index],
+            y=topn.values, marker_color="#4C8BF5",
+            text=[f"{v/conc['年間配当']:.1%}" for v in topn.values], textposition="outside"))
+        fig.update_layout(height=320, yaxis_title="年間配当（円）",
+                          title="配当の出どころ（上位15銘柄）",
+                          margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+    st.divider()
+    st.markdown("#### 不況が来たら、配当はどれだけ落ちるか")
+    st.caption("いま持っている銘柄が、**過去の不況で実際にどう振る舞ったか**を当てはめています。"
+               "当時まだ配当が無かった銘柄は分かりません。"
+               "分かるぶんで割合を出し、残りも同じように振る舞うとみなしています。")
+
+    stress = IR.stress_test(positions)
+    if stress.empty:
+        st.info("過去の配当データが足りず、判定できません。")
+    else:
+        cols = st.columns(len(stress))
+        for col, r in zip(cols, stress.itertuples()):
+            col.metric(r.できごと, f"−{r.減った割合:.0%}",
+                       f"残り {yen_short(r.残る年間配当)}", delta_color="off",
+                       help=f"{r.年度}年度／{r.説明}／"
+                            f"調べられたのは {r.調べられた銘柄} 銘柄"
+                            f"（配当の {r.調べられた配当の割合:.0%}）")
+        worst = stress.loc[stress["減った割合"].idxmax()]
+        st.error(f"**{worst['できごと']}級が来ると、年間配当は "
+                 f"{yen(conc['年間配当'])} → {yen(worst['残る年間配当'])} まで落ちます"
+                 f"（−{worst['減った割合']:.0%}）。**\n\n"
+                 "これは予想ではなく、**いま持っている銘柄が当時そう動いた**という記録です。"
+                 "現金を3割残しておくのは、この局面で買い向かうためです。")
+
+        show = pd.DataFrame({
+            "できごと": stress["できごと"], "年度": stress["年度"],
+            "調べられた銘柄": stress["調べられた銘柄"], "うち減配": stress["うち減配"],
+            "減る割合": to_pct(stress["減った割合"]).round(1),
+            "減る額": stress["いまの配当に当てはめた減少額"].round(0),
+            "残る年間配当": stress["残る年間配当"].round(0),
+            "説明": stress["説明"],
+        })
+        st.dataframe(show, hide_index=True, width="stretch", column_config={
+            "減る割合": st.column_config.NumberColumn(format="%.1f%%"),
+            "減る額": st.column_config.NumberColumn(format="¥%d"),
+            "残る年間配当": st.column_config.NumberColumn(format="¥%d"),
+            "説明": st.column_config.TextColumn(width="large")})
+
+        pick = st.selectbox("どの銘柄が配当を減らしたか見る",
+                            stress["できごと"].tolist(),
+                            index=int(stress["減った割合"].values.argmax()))
+        w = IR.worst_contributors(positions, pick, top=12)
+        if w.empty:
+            st.caption("この局面で減配した保有はありませんでした。")
+        else:
+            wv = w.copy()
+            wv["減配率"] = to_pct(wv["減配率"]).round(0)
+            st.dataframe(wv, hide_index=True, width="stretch", column_config={
+                "当時の1株配当": st.column_config.NumberColumn(format="¥%.1f"),
+                "その後の1株配当": st.column_config.NumberColumn(format="¥%.1f"),
+                "減配率": st.column_config.NumberColumn(format="%.0f%%"),
+                "いまの年間配当": st.column_config.NumberColumn(format="¥%d"),
+                "失う配当": st.column_config.NumberColumn(format="¥%d")})
+
+    st.divider()
+    st.markdown("#### 業種の偏り — 評価額で見るか、配当で見るか")
+    st.caption("業種の上限（20%）は**評価額**にかかっています。"
+               "でもインカムを守るなら、見るべきは**配当の構成比**です。")
+    ibs = IR.income_by_sector(positions)
+    if not ibs.empty:
+        top = ibs.head(12)
+        fig = go.Figure()
+        fig.add_bar(name="評価額の構成比", x=top["sector33"],
+                    y=to_pct(top["評価額の構成比"]), marker_color="#9AA5B1")
+        fig.add_bar(name="配当の構成比", x=top["sector33"],
+                    y=to_pct(top["配当の構成比"]), marker_color="#4C8BF5")
+        fig.add_hline(y=config["portfolio"]["max_sector_weight"] * 100,
+                      line_dash="dash", annotation_text="上限20%")
+        fig.update_layout(height=340, barmode="group", yaxis_title="構成比（%）",
+                          margin=dict(l=10, r=10, t=10, b=10),
+                          legend=dict(orientation="h", y=1.12))
+        st.plotly_chart(fig, width="stretch")
+
+        gap = ibs[ibs["配当の構成比"] > config["portfolio"]["max_sector_weight"]]
+        if not gap.empty:
+            st.warning("**配当の構成比が20%を超えている業種：**" + "、".join(
+                f"{r['sector33']}（配当 {r['配当の構成比']:.0%} ／ 評価額 "
+                f"{r['評価額の構成比']:.0%}）" for _, r in gap.iterrows())
+                + "\n\nこの業種がまとめて減配すると、インカムが大きく揺れます。")
+
+        iv = pd.DataFrame({
+            "業種": ibs["sector33"], "銘柄数": ibs["銘柄数"],
+            "評価額": ibs["評価額"].round(0), "年間配当": ibs["年間配当"].round(0),
+            "評価額の構成比": to_pct(ibs["評価額の構成比"]).round(1),
+            "配当の構成比": to_pct(ibs["配当の構成比"]).round(1),
+            "差": to_pct(ibs["差"]).round(1)})
+        st.dataframe(iv, hide_index=True, width="stretch", height=300, column_config={
+            "評価額": st.column_config.NumberColumn(format="¥%d"),
+            "年間配当": st.column_config.NumberColumn(format="¥%d"),
+            "評価額の構成比": st.column_config.NumberColumn(format="%.1f%%"),
+            "配当の構成比": st.column_config.NumberColumn(
+                format="%.1f%%", help="インカムを守るなら、こちらを見ます"),
+            "差": st.column_config.NumberColumn(
+                format="%+.1f%%", help="プラスなら「評価額の割に配当を多く出している業種」")})
 
 with tab2:
     exposure = sector_exposure(positions, config)

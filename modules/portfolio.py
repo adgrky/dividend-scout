@@ -226,6 +226,31 @@ def expected_dividends(pos: pd.DataFrame, config: dict, months_back: int = 12,
     return pd.DataFrame(rows).sort_values(["受取日", "銘柄名"]).reset_index(drop=True)
 
 
+def dividend_cash(days: int = 90) -> dict:
+    """受け取った配当のうち、まだ買い付けに回していないぶん。
+
+    いま年間 37万円ほど受け取っている。これは毎月の入金と同じ規模で、
+    **再投資しなければ「育つ」にならない**。整理で生まれた余力と同じ仕組みで、
+    受け取った配当も買い付けの原資として出す。
+
+    受取は税引後で記録してあるので、そのまま使える額。
+    配当の受取から buy を引くと、整理の売却代金と混ざってしまうので、
+    ここでは **受け取った配当の合計だけ**を出し、使ったかどうかは
+    ケンが画面で調整する。期間の既定を90日にしてあるのは、
+    日本株の配当が年2回（6月・12月に集中）まとめて入るため。
+    """
+    tx = read_df(
+        "SELECT date, shares, price FROM transactions "
+        "WHERE type='dividend' AND date >= date('now', ?)", (f"-{int(days)} day",))
+    if tx.empty:
+        return {"受取額": 0.0, "件数": 0, "期間": int(days)}
+    return {
+        "受取額": float((tx["shares"] * tx["price"]).sum()),
+        "件数": int(len(tx)),
+        "期間": int(days),
+    }
+
+
 def freed_cash(days: int = 30) -> dict:
     """整理して生まれた、まだ使っていないお金。
 
