@@ -121,11 +121,19 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
     return c
 
 
-def buy_gate(c: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, pd.Series]:
+def buy_gate(c: pd.DataFrame, config: dict,
+             require_capacity: bool = False) -> tuple[pd.DataFrame, pd.Series]:
     """買ってはいけないものを外す。
 
     順位を付ける前の足切り。安いからといって、配当が危ない銘柄や
     高配当トラップの判定が出ている銘柄に資金を入れる理由はない。
+
+    require_capacity を立てると、増配余力の条件も重ねる。
+    2026-09-15 の検証（EDINET の FY2022 起点・1,211銘柄・3年）で、
+    高利回りにこれを重ねると減配率が 8.8% → 5.4% に下がり、
+    リターンも +80.4% → +90.6% と上がった。
+    ただしコホートが1つ・3年しかなく、かけると候補の利回りが落ちる。
+    **既定では掛けない。** ケンが画面で選ぶ。
     """
     g = config["buy_priority"]
     reasons = pd.Series("", index=c.index)
@@ -135,6 +143,16 @@ def buy_gate(c: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, pd.Series]:
     reasons[bad_trap] = "高配当トラップの判定が出ている"
     low_health = c["health"].fillna(0) < float(g["min_health"])
     reasons[low_health & (reasons == "")] = "配当継続スコアが低い"
+
+    if require_capacity:
+        max_p = float(g.get("capacity_max_payout", 0.50))
+        min_f = float(g.get("capacity_min_fcf_cover", 2.0))
+        if "payout_ratio" in c.columns:
+            bad = c["payout_ratio"].fillna(9.9) > max_p
+            reasons[bad & (reasons == "")] = f"配当性向が{max_p:.0%}を超えている"
+        if "fcf_cover" in c.columns:
+            bad = c["fcf_cover"].fillna(0) < min_f
+            reasons[bad & (reasons == "")] = f"FCFが配当の{min_f:.0f}倍に届かない"
     return c[reasons == ""].copy(), reasons
 
 
@@ -155,7 +173,8 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
              require_below_target: bool = True,
              month_gap: dict[int, float] | None = None,
              allow_single_lot: bool = True,
-             lot: int = _LOT) -> pd.DataFrame:
+             lot: int = _LOT,
+             require_capacity: bool = False) -> pd.DataFrame:
     """入金額を候補に割り振る。
 
     Parameters
@@ -200,7 +219,7 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
         return pd.DataFrame()
 
     c = buy_priority(c, positions, config, month_gap)
-    c, _ = buy_gate(c, config)
+    c, _ = buy_gate(c, config, require_capacity=require_capacity)
     if c.empty:
         return pd.DataFrame()
     # 発掘スコアではなく買い付け優先度の順に配る

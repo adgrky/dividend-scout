@@ -218,6 +218,19 @@ with tab_buy:
                      "すべて落ちます（実測で投入枠30万円のうち9.9万円しか配れませんでした）")
     lot = 1 if odd_lot else 100
 
+    cap_g = config["buy_priority"]
+    require_capacity = st.checkbox(
+        f"増配余力の条件も満たすものだけにする"
+        f"（配当性向 {cap_g.get('capacity_max_payout', 0.5):.0%}以下 ／ "
+        f"FCFが配当の {cap_g.get('capacity_min_fcf_cover', 2.0):.0f}倍以上）",
+        value=False,
+        help="2026-09-15 の検証（EDINET の FY2022 起点・1,211銘柄・3年）で、"
+             "高利回りにこれを重ねると **減配率が 8.8% → 5.4%** に下がり、"
+             "リターンも +80.4% → +90.6% と上がりました。"
+             "ただし**コホートが1つ・3年**しかなく、"
+             "かけると候補の利回りが下がります（実測 4.17% → 3.82%）。"
+             "だから既定では掛けていません。")
+
     # 相場の水準による絞り込みは「新しく入れるお金」にだけかける。
     # 整理して作ったお金は、同じ市場の中で乗り換えるだけなので絞らない。
     # ここを一緒くたに絞ると、整理するたびに市場から少しずつ降りることになる。
@@ -249,8 +262,9 @@ with tab_buy:
     held = set(positions["ticker"]) if not positions.empty else set()
     cand = scores[scores["gate_passed"] == 1].copy().reset_index(drop=True)
     raw = pd.DataFrame([json.loads(x)["raw"] for x in cand["detail_json"]])
+    # 増配余力の足切りに使うので、配当性向とFCFカバー率も持たせる
     cand = pd.concat([cand, raw[["dividend_yield", "yield_percentile", "streak",
-                                 "payout_months"]]], axis=1)
+                                 "payout_months", "payout_ratio", "fcf_cover"]]], axis=1)
     if scope == "未保有のみ":
         cand = cand[~cand["ticker"].isin(held)]
     cand = cand[cand["dividend_yield"].fillna(0) >= min_yield]
@@ -259,7 +273,7 @@ with tab_buy:
     cand = cand.join(targets, on="ticker")
 
     scored = buy_priority(cand, positions, config, gaps)
-    _, gate_reasons = buy_gate(scored, config)
+    _, gate_reasons = buy_gate(scored, config, require_capacity=require_capacity)
     n_cut = int((gate_reasons != "").sum())
     if n_cut:
         st.caption(f"候補 {len(scored)} 件のうち **{n_cut} 件を足切り**しました"
@@ -268,7 +282,8 @@ with tab_buy:
 
     plan = allocate(cash, cand, positions, config, max_names=int(max_names),
                     per_name_cap_pct=float(per_cap), require_below_target=require_target,
-                    month_gap=gaps, allow_single_lot=single_lot, lot=lot)
+                    month_gap=gaps, allow_single_lot=single_lot, lot=lot,
+                    require_capacity=require_capacity)
 
     st.divider()
     if plan.empty:
