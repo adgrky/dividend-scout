@@ -2,6 +2,7 @@
 data/*.db
 data/*.db-journal
 data/cache/
+data/edinet_cache/
 data/*.pkl
 
 # Python
