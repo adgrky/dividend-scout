@@ -93,6 +93,9 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
     c["_補完度"] = ((room + month_fit) / 2 * 100).clip(0, 100)
 
     # ── 目標到達度（表示用。順位には使わず、絞り込みの条件として使う）──
+    # 目標利回りが結合されていない画面から呼ばれることもあるので、既定値で埋める
+    if "target_yield" not in c.columns:
+        c["target_yield"] = np.nan
     tgt = c["target_yield"].fillna(0.047).replace(0, np.nan)
     c["_目標到達"] = (c["dividend_yield"] / tgt * 100).clip(0, 200).fillna(0)
 

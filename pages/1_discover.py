@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from modules.format import csv_bytes, to_pct
+from modules.store import read_df
 from modules.ui import (LAYER_LABELS, get_config, get_holdings, get_scores,
                         get_watchlist, no_data_guard)
 
@@ -44,8 +45,10 @@ view["配当月"] = view["payout_months"].fillna("") if "payout_months" in view.
 # ── フィルタ ──
 c1, c2, c3 = st.columns([1.1, 1.5, 1.6])
 with c1:
-    scope = st.radio("表示", ["新規のみ", "すべて", "保有のみ"],
-                     help="「新規のみ」＝まだ持っていない・監視もしていない銘柄。発掘の主目的はここ")
+    scope = st.radio("表示", ["新規のみ", "買い増しどき", "すべて", "保有のみ"],
+                     help="「新規のみ」＝まだ持っていない・監視もしていない銘柄（発掘の主目的）。\n"
+                          "「買い増しどき」＝すでに持っていて、いま自己利回り順位が高い銘柄。"
+                          "配当が育っている銘柄を安く買い足せる機会です")
     top_n = st.number_input("表示件数", 10, 400, 50, step=10)
 with c2:
     min_yield = st.slider("最低利回り（%）", 0.0, 8.0, 3.0, 0.25) / 100
@@ -61,14 +64,20 @@ with c3:
     month = st.selectbox("配当がある月", _MONTHS, index=0,
                          help="配当の受け取りが特定の月に偏っているとき、"
                               "空いている月に配当がある銘柄を探すのに使います（直近3年の実績）")
-    sort_by = st.selectbox("並び順", ["総合スコア", "配当継続スコア", "配当利回り",
-                                   "自己利回り順位", "連続増配年数", "ヘム指数"])
+    sort_by = st.selectbox("並び順", ["買い付け優先度", "発掘スコア", "配当継続スコア",
+                                   "配当利回り", "自己利回り順位", "連続増配年数", "ヘム指数"],
+                           help="**買い付け優先度**＝いま買う順番（√(割安度×配当継続)）。\n"
+                                "**発掘スコア**＝見つける順番（市場に気づかれていないかを含む）")
 
 show_layers = st.checkbox("採点の内訳（5層）も表示", value=False)
 
 f = view.copy()
 if scope == "新規のみ":
     f = f[f["新規"]]
+elif scope == "買い増しどき":
+    # すでに持っていて、その銘柄自身の過去と比べていま安い銘柄。
+    # 配当が育っている銘柄を安く買い足すのは、新規を探すのと同じくらい価値がある。
+    f = f[f["保有"] & (f["yield_percentile"].fillna(0) >= 0.7)]
 elif scope == "保有のみ":
     f = f[f["保有"]]
 f = f[f["dividend_yield"].fillna(0) >= min_yield]
@@ -80,8 +89,21 @@ if hem_only:
 if month != "—":
     f = f[f["配当月"].fillna("").str.contains(month, regex=False)]
 
-_SORT = {"総合スコア": "total", "配当継続スコア": "health", "配当利回り": "dividend_yield",
-         "自己利回り順位": "yield_percentile", "連続増配年数": "streak", "ヘム指数": "hem_ratio"}
+# 資金投入と同じ式で買い付け優先度を出す。画面ごとに違う指標を見せない。
+from modules.allocator import buy_priority, month_gaps          # noqa: E402
+from modules.portfolio import dividend_calendar                 # noqa: E402
+from modules.ui import get_positions                            # noqa: E402
+
+_pos = get_positions(config)
+# 目標利回り（保有・ウォッチに設定したもの）を貼っておく
+_tg = read_df("SELECT ticker, target_yield FROM watchlist "
+              "UNION SELECT ticker, target_yield FROM holdings").groupby("ticker").first()
+f = f.join(_tg, on="ticker")
+f = buy_priority(f, _pos, config, month_gaps(_pos, dividend_calendar(_pos)))
+
+_SORT = {"買い付け優先度": "買い付け優先度", "発掘スコア": "total", "配当継続スコア": "health",
+         "配当利回り": "dividend_yield", "自己利回り順位": "yield_percentile",
+         "連続増配年数": "streak", "ヘム指数": "hem_ratio"}
 f = f.nlargest(int(top_n), _SORT[sort_by])
 
 st.markdown(f"**ゲート通過 {len(passed):,} 銘柄** ／ 条件該当 **{len(f):,} 件** "
@@ -94,6 +116,7 @@ table = pd.DataFrame({
     "コード": f["code"].values,
     "銘柄名": f["name"].values,
     "業種": f["sector33"].values,
+    "買い付け": f["買い付け優先度"].round(0).values,
     "発掘": f["total"].round(1).values,
     "継続": f["health"].round(0).values,
     "株価": f["last_close"].round(0).values,
@@ -116,6 +139,9 @@ event = st.dataframe(
     table, width="stretch", hide_index=True, height=560,
     on_select="rerun", selection_mode="single-row",
     column_config={
+        "買い付け": st.column_config.ProgressColumn(
+            format="%.0f", min_value=0, max_value=100,
+            help="いま買う順番。√(割安度 × 配当継続) × 補完度係数 − トラップ減点"),
         "発掘": st.column_config.ProgressColumn(
             format="%.1f", min_value=0, max_value=100,
             help="市場にまだ気づかれていない増配候補としての点数。大型株は構造的に低く出ます"),
@@ -148,9 +174,21 @@ if sel:
     c1.info(f"**{picked['code']} {picked['name']}**（{picked['sector33']}）　"
             f"利回り {picked['dividend_yield']:.2%}／自己利回り順位 {picked['yield_percentile']:.0%}"
             f"／連続増配 {int(picked['streak'] or 0)}年")
-    if c2.button("📄 この銘柄のカルテを見る", type="primary", width="stretch"):
+    b1, b2 = c2.columns(2)
+    if b1.button("📄 カルテ", type="primary", width="stretch"):
         st.session_state["profile_ticker"] = picked["ticker"]
         st.switch_page("pages/2_profile.py")
+    if b2.button("⭐ 監視に追加", width="stretch",
+                 help="ウォッチリストに入れると、監視タブが減配や指値到達を見張ります"):
+        from modules.store import connect
+        with connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO watchlist (ticker, name, target_yield, source, added_at) "
+                "VALUES (?, ?, 0.047, 'scout', date('now'))",
+                (picked["ticker"], picked["name"]))
+        st.success(f"{picked['name']} を監視に追加しました。"
+                   "カルテで棄却条件を書いておくと、そこも見張ります。")
+        st.cache_data.clear()
 else:
     st.caption("💡 行をクリックすると、その銘柄のカルテに移動できます。")
 

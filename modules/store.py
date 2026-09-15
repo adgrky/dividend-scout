@@ -23,6 +23,7 @@ ORM は使わず生 SQL。DB はローカルが唯一の正で、保有情報は
     settings      key-value
     market_history 日経平均とPBRの日次記録（暴落時の買い向かいの判断に使う）
     holding_review 整理の判断（持ち続ける/様子見）。同じ銘柄が毎回並ばないように
+    equity_history 評価額と年間配当の推移。インカムが育っているかを見る
 """
 from __future__ import annotations
 
@@ -221,6 +222,16 @@ CREATE TABLE IF NOT EXISTS company_profile (
     policy_flags    TEXT,    -- 累進配当・DOE・配当性向目標などの検出結果（JSON）
     policy_score    REAL,    -- 0〜1。増配意思スコアに使う
     updated_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS equity_history (   -- 資産と配当の推移（日次スナップショット）
+    date            TEXT PRIMARY KEY,
+    total_eval      REAL,
+    total_cost      REAL,
+    annual_dividend REAL,
+    annual_dividend_after_tax REAL,
+    holdings_count  INTEGER,
+    yoc             REAL
 );
 
 CREATE TABLE IF NOT EXISTS market_history (   -- 相場の水準（自前で貯める）

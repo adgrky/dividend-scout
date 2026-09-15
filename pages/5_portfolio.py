@@ -5,8 +5,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from datetime import date
+
 from modules.format import pct, to_pct, yen, yen_short
-from modules.portfolio import dividend_calendar, sector_exposure
+from modules.portfolio import (dividend_calendar, dividends_received, record_equity,
+                               sector_exposure)
+from modules.store import connect, read_df
 from modules.ui import get_config, get_positions
 
 st.title("📊 ポートフォリオ")
@@ -40,7 +44,12 @@ n_ok = int((positions["gate_passed"] == 1).sum())
 st.caption(f"保有 {len(positions)} 銘柄 ／ 1銘柄あたり平均 {yen_short(total_eval / len(positions))}"
            f" ／ 採用基準を満たすもの {n_ok} 銘柄")
 
-tab1, tab2, tab3 = st.tabs(["保有一覧", "業種の配分", "配当月"])
+# その日の評価額と年間配当を1日1行だけ残す。
+# インカム投資の目的は「配当が育つこと」なので、推移が見えないと成果が分からない。
+record_equity(positions, config)
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["保有一覧", "業種の配分", "配当月", "配当の受取記録", "推移"])
 
 with tab1:
     src = positions.copy()
@@ -122,5 +131,111 @@ with tab3:
                    f"（{yen(peak['amount'])}・全体の {share:.0%}）。")
         if empty_months:
             st.info(f"**受け取りがゼロの月：{'、'.join(empty_months)}**　\n"
-                    "🔭 発掘 の「権利確定月」でこれらの月を選ぶと、"
+                    "🔭 発掘 の「配当がある月」でこれらの月を選ぶと、"
                     "受取を平準化できる銘柄を探せます。")
+
+with tab4:
+    st.caption("実際に受け取った配当を記録します。**税引後の手取り額**を入れてください。"
+               "予想ではなく実績が貯まると、インカムが本当に育っているかが分かります。")
+    got = dividends_received(config)
+
+    if not got.empty:
+        this_year = got[got["年"] == date.today().year]
+        c1, c2, c3 = st.columns(3)
+        c1.metric(f"{date.today().year}年の受取（税引後）", yen(this_year["受取額"].sum()))
+        c2.metric("累計の受取", yen(got["受取額"].sum()))
+        c3.metric("記録件数", f"{len(got)} 件")
+
+        by_year = got.groupby("年")["受取額"].sum().reset_index()
+        fig = go.Figure(go.Bar(x=by_year["年"].astype(str), y=by_year["受取額"],
+                               marker_color="#4C8BF5",
+                               text=[f"{v:,.0f}円" for v in by_year["受取額"]],
+                               textposition="outside"))
+        fig.update_layout(height=300, yaxis_title="受け取った配当（円・税引後）",
+                          margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.info("まだ記録がありません。証券会社の配当金計算書を見ながら、下で足していけます。")
+
+    st.markdown("#### 受け取った配当を足す")
+    holds = positions[["ticker", "name", "account", "shares"]].drop_duplicates()
+    labels = holds.apply(
+        lambda r: f"{r['ticker'][:-2]} {r['name']}（{'NISA' if r['account'] == 'nisa' else '特定'}）",
+        axis=1).tolist()
+    lookup = dict(zip(labels, holds.itertuples(index=False)))
+
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    with c1:
+        pick = st.selectbox("銘柄", [""] + labels)
+    with c2:
+        recv_date = st.date_input("受取日", value=date.today())
+    with c3:
+        amount = st.number_input("受取額（税引後・円）", 0, 10_000_000, 0, 100)
+    with c4:
+        st.write("")
+        st.write("")
+        add = st.button("記録する", type="primary")
+
+    if add:
+        if not pick or amount <= 0:
+            st.warning("銘柄と受取額を入れてください")
+        else:
+            row = lookup[pick]
+            with connect() as conn:
+                conn.execute(
+                    "INSERT INTO transactions (date, account, ticker, name, type, shares, "
+                    "price, fee, memo) VALUES (?, ?, ?, ?, 'dividend', 1, ?, 0, ?)",
+                    (recv_date.isoformat(), row.account, row.ticker, row.name,
+                     float(amount), "配当の受取記録（税引後）"))
+            st.success(f"{row.name} の配当 {yen(amount)} を記録しました")
+            st.cache_data.clear()
+
+    if not got.empty:
+        st.markdown("#### 記録の一覧")
+        view = got[["date", "account", "ticker", "name", "受取額"]].copy()
+        view["date"] = view["date"].dt.strftime("%Y-%m-%d")
+        view["account"] = view["account"].map({"specific": "特定", "nisa": "NISA"}).fillna(view["account"])
+        st.dataframe(view.rename(columns={
+            "date": "受取日", "account": "口座", "ticker": "銘柄", "name": "銘柄名"}).iloc[::-1],
+            hide_index=True, width="stretch", height=300,
+            column_config={"受取額": st.column_config.NumberColumn(format="¥%d")})
+
+with tab5:
+    hist = read_df("SELECT * FROM equity_history ORDER BY date")
+    if len(hist) < 2:
+        st.info("推移はこれから貯まります。アプリを開くたびに、その日の評価額と年間配当を"
+                "1行だけ記録しています。数週間で形になります。")
+        if not hist.empty:
+            st.dataframe(hist, hide_index=True, width="stretch")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = go.Figure()
+            fig.add_scatter(x=hist["date"], y=hist["total_eval"], name="評価額",
+                            line=dict(color="#4C8BF5"))
+            fig.add_scatter(x=hist["date"], y=hist["total_cost"], name="取得額",
+                            line=dict(color="#999", dash="dot"))
+            fig.update_layout(height=300, yaxis_title="円", title="評価額と取得額",
+                              margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig, width="stretch")
+        with c2:
+            fig = go.Figure()
+            fig.add_scatter(x=hist["date"], y=hist["annual_dividend"], name="年間配当（税引前）",
+                            line=dict(color="#E45756"))
+            fig.add_scatter(x=hist["date"], y=hist["annual_dividend_after_tax"],
+                            name="年間配当（税引後）", line=dict(color="#E45756", dash="dot"))
+            fig.update_layout(height=300, yaxis_title="円", title="年間配当",
+                              margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig, width="stretch")
+        st.caption("**インカム投資で見るべきは右のグラフ**です。評価額は市場が決めますが、"
+                   "年間配当は増配と買い増しで自分が育てられます。")
+        st.dataframe(hist.iloc[::-1], hide_index=True, width="stretch", height=300,
+                     column_config={
+                         "total_eval": st.column_config.NumberColumn("評価額", format="¥%d"),
+                         "total_cost": st.column_config.NumberColumn("取得額", format="¥%d"),
+                         "annual_dividend": st.column_config.NumberColumn("年間配当", format="¥%d"),
+                         "annual_dividend_after_tax": st.column_config.NumberColumn(
+                             "年間配当（税引後）", format="¥%d"),
+                         "holdings_count": st.column_config.NumberColumn("銘柄数"),
+                         "yoc": st.column_config.NumberColumn("YOC", format="%.4f"),
+                         "date": st.column_config.TextColumn("日付")})

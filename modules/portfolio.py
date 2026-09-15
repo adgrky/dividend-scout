@@ -148,3 +148,44 @@ def review_candidates(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
     # 重いものを上に、その中では金額の大きいものを上に
     out["_o"] = out["重さ"].map({"重大": 0, "軽微": 1}).fillna(2)
     return out.sort_values(["_o", "eval_value"], ascending=[True, False]).drop(columns="_o")
+
+
+def record_equity(pos: pd.DataFrame, config: dict) -> None:
+    """その日の評価額と年間配当を残す。
+
+    インカム投資の目的は「配当が育つこと」なので、評価額よりも
+    **年間配当がいくらになったか**の推移が本番。1日1行だけ残す。
+    """
+    from datetime import date as _date
+    from modules.store import upsert_df
+    if pos is None or pos.empty:
+        return
+    cost = float(pos["cost_value"].sum())
+    div = float(pos["annual_dividend"].sum())
+    row = {
+        "date": _date.today().isoformat(),
+        "total_eval": float(pos["eval_value"].sum()),
+        "total_cost": cost,
+        "annual_dividend": div,
+        "annual_dividend_after_tax": float(pos["annual_dividend_after_tax"].sum()),
+        "holdings_count": int(len(pos)),
+        "yoc": (div / cost) if cost else None,
+    }
+    upsert_df("equity_history", pd.DataFrame([row]),
+              ["date", "total_eval", "total_cost", "annual_dividend",
+               "annual_dividend_after_tax", "holdings_count", "yoc"])
+
+
+def dividends_received(config: dict) -> pd.DataFrame:
+    """実際に受け取った配当の記録（税引後）。"""
+    from modules.store import read_df
+    tx = read_df("SELECT date, account, ticker, name, shares, price, memo "
+                 "FROM transactions WHERE type='dividend' ORDER BY date")
+    if tx.empty:
+        return tx
+    tx["date"] = pd.to_datetime(tx["date"])
+    # price に「1株あたりの受取額（税引後）」を入れる運用にする
+    tx["受取額"] = tx["shares"] * tx["price"]
+    tx["年"] = tx["date"].dt.year
+    tx["月"] = tx["date"].dt.month
+    return tx
