@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 土曜 09:00 に全市場スキャン。
-     インストール（ケンが自分で実行する）:
-       cp schedule/com.ken.dividend-scout.weekly.plist ~/Library/LaunchAgents/
-       launchctl load ~/Library/LaunchAgents/com.ken.dividend-scout.weekly.plist -->
+<!-- ⚠️ これは手書きの見本で、いまは使っていません。
+     自動更新のオン／オフは 自動更新の設定.command をダブルクリックしてください。
+     そちらは scripts/scheduled_update.py を呼び、古いものだけ更新します。 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>

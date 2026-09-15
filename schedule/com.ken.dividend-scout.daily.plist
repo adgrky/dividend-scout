@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 平日 07:30 に保有とウォッチリストを監視。
-     インストール（ケンが自分で実行する）:
-       cp schedule/com.ken.dividend-scout.daily.plist ~/Library/LaunchAgents/
-       launchctl load ~/Library/LaunchAgents/com.ken.dividend-scout.daily.plist -->
+<!-- ⚠️ これは手書きの見本で、いまは使っていません。
+     毎朝の通知は使わない方針になりました（異変はアプリの 🚨 監視 で見ます）。 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
