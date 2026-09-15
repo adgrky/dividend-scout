@@ -11,16 +11,17 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from modules import explain as E
+from modules import explain as E, peers as P
 from modules.format import pct, to_pct, yen, yen_short
 from modules.store import read_df
-from modules.ui import (LAYER_LABELS, get_config, get_dividend_profile, get_prices,
-                        get_scores, no_data_guard)
+from modules.ui import (LAYER_LABELS, get_config, get_dividend_profile,
+                        get_next_ex_dates, get_prices, get_scores, no_data_guard)
 from modules.valuation import price_for_target_yield, yield_percentile, yield_series
 
 st.title("📄 銘柄カルテ")
@@ -188,6 +189,71 @@ for key, label in LAYER_LABELS.items():
                 st.caption(d["目安"])
             st.markdown("")
 
+# ── 同業他社との横並び ──
+st.markdown("#### 同業他社と並べると")
+st.caption(f"採用基準を通った約700社のうち、同じ **{row['sector33']}** の会社と比べています。"
+           "営業利益率も自己資本比率も業種で水準が全く違うので、"
+           "**絶対値ではなく業種の中での位置**で見ます。")
+
+peer_table, peer_pos = P.build(scores, row["sector33"], ticker)
+if peer_pos.empty:
+    st.caption("同業の比較データがまだ足りません。")
+else:
+    if len(peer_table) < 5:
+        st.warning(f"この業種で採用基準を通っているのは **{len(peer_table)} 社**しかありません。"
+                   "母集団が小さいので、順位はあまり当てになりません。")
+    pv = pd.DataFrame({
+        "指標": peer_pos["指標"],
+        "この銘柄": [P.fmt(v, f) for v, f in zip(peer_pos["この銘柄"], peer_pos["_fmt"])],
+        "業種の中央値": [P.fmt(v, f) for v, f in zip(peer_pos["業種の中央値"], peer_pos["_fmt"])],
+        "業種でいちばん良い": [P.fmt(v, f) for v, f in zip(peer_pos["業種の最良"], peer_pos["_fmt"])],
+        "業種内の順位": peer_pos["業種内の順位"],
+        "位置": peer_pos["_pctile"],
+        "評価": peer_pos["評価"].map({"上位": "🟢 上位", "ふつう": "⚪️ ふつう",
+                                   "下位": "🔴 下位"}),
+    })
+    st.dataframe(pv, hide_index=True, width="stretch", column_config={
+        "位置": st.column_config.ProgressColumn(
+            format=" ", min_value=0.0, max_value=1.0,
+            help="右にいくほど業種内で良い位置。1.0が業種トップ"),
+        "指標": st.column_config.TextColumn(width="small"),
+    })
+    good = peer_pos[peer_pos["評価"] == "上位"]["指標"].tolist()
+    bad = peer_pos[peer_pos["評価"] == "下位"]["指標"].tolist()
+    if good:
+        st.success("**業種の中で上位**：" + "、".join(good))
+    if bad:
+        st.warning("**業種の中で下位**：" + "、".join(bad)
+                   + "　←　ここが「この業種ではふつうのこと」なのか"
+                     "「この会社だけの問題」なのかを、事業の内容と照らして考えます。")
+
+    with st.expander(f"{row['sector33']} の同業一覧（{len(peer_table)} 社）"):
+        pt = peer_table.copy()
+        pt["これ"] = np.where(pt["ticker"] == ticker, "◀", "")
+        show_cols = {"code": "コード", "name": "銘柄名", "dividend_yield": "利回り",
+                     "payout_ratio": "配当性向", "streak": "連続増配", "per": "PER",
+                     "pbr": "PBR", "roe": "ROE", "equity_ratio": "自己資本比率",
+                     "market_cap_oku": "時価総額", "health": "配当継続", "total": "発掘スコア"}
+        pt = pt[[c for c in show_cols if c in pt.columns] + ["これ"]].rename(columns=show_cols)
+        for c in ("利回り", "配当性向", "ROE", "自己資本比率"):
+            if c in pt.columns:
+                pt[c] = to_pct(pt[c])
+        st.dataframe(pt.sort_values("利回り", ascending=False), hide_index=True,
+                     width="stretch", height=380, column_config={
+                         "利回り": st.column_config.NumberColumn(format="%.2f%%"),
+                         "配当性向": st.column_config.NumberColumn(format="%.1f%%"),
+                         "ROE": st.column_config.NumberColumn(format="%.1f%%"),
+                         "自己資本比率": st.column_config.NumberColumn(format="%.1f%%"),
+                         "PER": st.column_config.NumberColumn(format="%.1f 倍"),
+                         "PBR": st.column_config.NumberColumn(format="%.2f 倍"),
+                         "連続増配": st.column_config.NumberColumn(format="%d 年"),
+                         "時価総額": st.column_config.NumberColumn(format="%d 億円"),
+                         "配当継続": st.column_config.NumberColumn(format="%.0f"),
+                         "発掘スコア": st.column_config.NumberColumn(format="%.0f"),
+                     })
+
+st.divider()
+
 traps_found = detail.get("traps") or []
 for t in traps_found:
     st.warning(f"⚠️ {t}")
@@ -334,8 +400,16 @@ with c2:
             f"の位置です。100%に近いほど「この会社としては、めったにない高利回り」。\n\n"
             f"過去の中央値 **{pct(info.get('median'), 2)}** ／ "
             f"よくある範囲 {pct(info.get('p25'), 2)}〜{pct(info.get('p75'), 2)}")
-    ex = raw.get("ex_dividend_date")
-    if not company.empty and pd.notna(company["ex_dividend_date"].iloc[0]):
+    nx = get_next_ex_dates((ticker,))
+    if not nx.empty:
+        r0 = nx.iloc[0]
+        st.metric("次の権利落ち日（予測）",
+                  f"{r0['次の権利落ち日']}（あと {int(r0['あと何日'])} 日）",
+                  help="この日までに買って持っていれば、その回の配当を受け取れます。"
+                       "yfinance の権利確定日は1,272社中5社しか入っていないため、"
+                       "配当履歴から予測しています（会社の発表ではありません）")
+        st.caption(f"{r0['根拠']}／1株配当の目安 {yen(r0['1株配当の目安'])}")
+    elif not company.empty and pd.notna(company["ex_dividend_date"].iloc[0]):
         st.metric("直近の権利確定日", str(company["ex_dividend_date"].iloc[0]),
                   help="この日までに買って持っていれば配当を受け取れます")
     if not company.empty and pd.notna(company["dividend_rate"].iloc[0]):

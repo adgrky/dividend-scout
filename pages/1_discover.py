@@ -16,7 +16,8 @@ import streamlit as st
 
 from modules.format import csv_bytes, to_pct
 from modules.store import read_df
-from modules.ui import (LAYER_LABELS, get_config, get_holdings, get_scores,
+from modules.ui import (LAYER_LABELS, get_config, get_holdings, get_next_ex_dates,
+                        get_scores,
                         get_watchlist, no_data_guard)
 
 st.title("🔭 発掘")
@@ -112,6 +113,16 @@ st.markdown(f"**ゲート通過 {len(passed):,} 銘柄** ／ 条件該当 **{len
 default_target = 0.047
 limit_price = (f["dps_latest"] / default_target).where(f["dps_latest"] > 0)
 
+# 次の権利落ち日。yfinance の権利確定日は1,272社中5社しか入っていないので、
+# 配当履歴から予測する（会社の発表ではない）。
+_ex = get_next_ex_dates(tuple(sorted(set(f["ticker"]))))
+if _ex.empty:
+    _ex_label = pd.Series(dtype=object)
+    _ex_days = pd.Series(dtype=float)
+else:
+    _ex_label = _ex.set_index("ticker")["次の権利落ち日"].astype(str)
+    _ex_days = _ex.set_index("ticker")["あと何日"]
+
 table = pd.DataFrame({
     "コード": f["code"].values,
     "銘柄名": f["name"].values,
@@ -127,6 +138,8 @@ table = pd.DataFrame({
     "連続増配": f["streak"].values,
     "DPS5年成長": to_pct(f["cagr_5y"]).values,
     "配当月": f["配当月"].values,
+    "次の権利落ち": _ex_label.reindex(f["ticker"]).values,
+    "あと何日": _ex_days.reindex(f["ticker"]).values,
     f"指値({default_target:.1%})": limit_price.round(0).values,
     "保有": f["保有"].values,
 })
@@ -160,6 +173,11 @@ event = st.dataframe(
         "連続増配": st.column_config.NumberColumn(format="%d 年"),
         "DPS5年成長": st.column_config.NumberColumn(format="%.1f%%", help="1株配当の5年の年率成長率"),
         "配当月": st.column_config.TextColumn(help="配当の権利が確定する月（直近3年の実績）"),
+        "次の権利落ち": st.column_config.TextColumn(
+            help="この日までに買って持っていれば、その回の配当を受け取れます。"
+                 "配当履歴からの予測で、会社の発表ではありません"),
+        "あと何日": st.column_config.NumberColumn(
+            format="%d 日", help="小さいほど権利落ちが近い。買うなら急ぐ"),
         f"指値({default_target:.1%})": st.column_config.NumberColumn(
             format="¥%d", help=f"直近の実績配当で利回り{default_target:.1%}に届く株価"),
     },

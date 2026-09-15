@@ -11,7 +11,7 @@ from modules.format import pct, to_pct, yen, yen_short
 from modules.portfolio import (dividend_calendar, dividends_received,
                                expected_dividends, record_equity, sector_exposure)
 from modules.store import connect, read_df
-from modules.ui import get_config, get_positions
+from modules.ui import get_config, get_next_ex_dates, get_positions
 
 st.title("📊 ポートフォリオ")
 
@@ -48,8 +48,8 @@ st.caption(f"保有 {len(positions)} 銘柄 ／ 1銘柄あたり平均 {yen_shor
 # インカム投資の目的は「配当が育つこと」なので、推移が見えないと成果が分からない。
 record_equity(positions, config)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["保有一覧", "業種の配分", "配当月", "配当の受取記録", "推移"])
+tab1, tab2, tab3, tab6, tab4, tab5 = st.tabs(
+    ["保有一覧", "業種の配分", "配当月", "次の権利落ち日", "配当の受取記録", "推移"])
 
 with tab1:
     edit_mode = st.toggle("株数と取得単価を直す", value=False,
@@ -80,7 +80,7 @@ with tab1:
                 "銘柄名": st.column_config.TextColumn(disabled=True),
                 "口座": st.column_config.TextColumn(disabled=True),
                 "株価": st.column_config.NumberColumn(format="¥%d", disabled=True),
-                "株数": st.column_config.NumberColumn(min_value=0.0, step=100.0),
+                "株数": st.column_config.NumberColumn(min_value=0.0, step=1.0),
                 "取得単価": st.column_config.NumberColumn(format="¥%.1f", min_value=0.0),
                 "目標利回り": st.column_config.NumberColumn(
                     format="%.3f", min_value=0.0, max_value=0.2,
@@ -193,6 +193,65 @@ with tab3:
                     "🔭 発掘 の「配当がある月」でこれらの月を選ぶと、"
                     "受取を平準化できる銘柄を探せます。")
 
+with tab6:
+    st.caption("**権利落ち日までに持っていれば、その回の配当を受け取れます。** "
+               "yfinance の権利確定日は実測で1,272社のうち5社しか入っていなかったので、"
+               "**配当履歴から予測**しています（会社の発表ではありません）。"
+               "日本株の権利落ち日は決算期末に固定されていて、実質その月の最終営業日です。")
+
+    ex = get_next_ex_dates(tuple(sorted(set(positions["ticker"]))))
+    if ex.empty:
+        st.info("配当履歴が足りず、予測できませんでした。")
+    else:
+        pos_sum = positions.groupby("ticker").agg(
+            name=("name", "first"), code=("code", "first"),
+            sector33=("sector33", "first"), shares=("shares", "sum"),
+            eval_value=("eval_value", "sum")).reset_index()
+        m = ex.merge(pos_sum, on="ticker", how="inner")
+        m["受取見込み"] = (m["shares"] * m["1株配当の目安"]).round(0)
+
+        soon = m[m["あと何日"] <= 30]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("30日以内に権利落ち", f"{len(soon)} 銘柄")
+        c2.metric("その受取見込み（税引前）", yen(soon["受取見込み"].sum()))
+        # 「2026-09-30（あと15日）」だと幅が足りず「あと 1…」と切れる。
+        # 日付を値に、日数は下の差分に回す。
+        c3.metric("いちばん近い日", str(m["次の権利落ち日"].iloc[0]),
+                  f"あと {int(m['あと何日'].iloc[0])} 日", delta_color="off")
+
+        if not soon.empty:
+            st.warning(f"**{m['次の権利落ち日'].iloc[0]} に {int((m['次の権利落ち日'] == m['次の権利落ち日'].iloc[0]).sum())} 銘柄**が"
+                       "権利落ちします。買い増すならこの日までです。")
+
+        days = st.slider("何日先まで見るか", 15, 400, 120, 15, format="%d 日")
+        view = m[m["あと何日"] <= days].copy()
+        show = pd.DataFrame({
+            "次の権利落ち日": view["次の権利落ち日"].astype(str),
+            "あと何日": view["あと何日"],
+            "コード": view["code"], "銘柄名": view["name"], "業種": view["sector33"],
+            "株数": view["shares"], "1株配当の目安": view["1株配当の目安"],
+            "受取見込み（税引前）": view["受取見込み"], "評価額": view["eval_value"],
+            "根拠": view["根拠"],
+        })
+        st.dataframe(show, hide_index=True, width="stretch", height=420, column_config={
+            "あと何日": st.column_config.NumberColumn(format="%d 日"),
+            "1株配当の目安": st.column_config.NumberColumn(
+                format="¥%.2f", help="前回の同じ月の実績。会社予想ではありません"),
+            "受取見込み（税引前）": st.column_config.NumberColumn(format="¥%d"),
+            "評価額": st.column_config.NumberColumn(format="¥%d"),
+            "根拠": st.column_config.TextColumn(width="medium"),
+        })
+
+        by_date = view.groupby("次の権利落ち日")["受取見込み"].sum().reset_index()
+        if len(by_date) > 1:
+            fig = go.Figure(go.Bar(x=by_date["次の権利落ち日"].astype(str),
+                                   y=by_date["受取見込み"], marker_color="#4C8BF5"))
+            fig.update_layout(height=280, yaxis_title="受取見込み（円・税引前）",
+                              margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+        st.download_button("この一覧をCSVで保存", show.to_csv(index=False).encode("utf-8-sig"),
+                           f"権利落ち日_{date.today():%Y%m%d}.csv", "text/csv")
+
 with tab4:
     st.caption("実際に受け取った配当を記録します。**税引後の手取り額**を入れてください。"
                "予想ではなく実績が貯まると、インカムが本当に育っているかが分かります。")
@@ -248,7 +307,7 @@ with tab4:
                 "口座": st.column_config.TextColumn(disabled=True),
                 "権利落ち日": st.column_config.DateColumn(disabled=True),
                 "受取日": st.column_config.DateColumn(),
-                "株数": st.column_config.NumberColumn(min_value=0.0, step=100.0),
+                "株数": st.column_config.NumberColumn(min_value=0.0, step=1.0),
                 "1株配当": st.column_config.NumberColumn(format="¥%.2f", disabled=True),
                 "税引前": st.column_config.NumberColumn(format="¥%d", disabled=True),
                 "受取額（税引後）": st.column_config.NumberColumn(format="¥%d", min_value=0.0),

@@ -235,7 +235,17 @@ def compute_health(df: pd.DataFrame, config: dict,
     lf = pd.DataFrame(layers)
     penalty = (trap_penalty.reindex(pool.index).fillna(0.0)
                if trap_penalty is not None else pd.Series(0.0, index=pool.index))
-    return pd.DataFrame({"health": (lf[HEALTH_LAYERS].mean(axis=1) - penalty).clip(lower=0.0)})
+    out = pd.DataFrame({"health": (lf[HEALTH_LAYERS].mean(axis=1) - penalty).clip(lower=0.0)})
+    # 基準を外れた銘柄にも実数を残す。ケンの保有114銘柄のうち83銘柄は基準を外れて
+    # いるので、ここに実数が無いとカルテが空になり、売り判定も「判定待ち」になる。
+    # 発掘スコアの内訳（層ごとの順位）は付けない。あれはゲート通過銘柄の中での
+    # 順位なので、母集団の違う銘柄に付けると意味の違う数字になる。
+    out["raw_json"] = [
+        json.dumps({"raw": {k: _round(pool.loc[t, k]) for k in _RAW_KEYS
+                            if k in pool.columns}}, ensure_ascii=False)
+        for t in pool.index
+    ]
+    return out
 
 
 def compute_scores(df: pd.DataFrame, config: dict, trap_penalty: pd.Series | None = None,

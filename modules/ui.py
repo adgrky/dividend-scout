@@ -79,3 +79,10 @@ def score_bar(row: pd.Series) -> None:
         col.metric(label, f"{val:.0f}" if pd.notna(val) else "—")
     penalty = row.get("trap_penalty") or 0
     cols[-1].metric("トラップ減点", f"-{penalty:.0f}" if penalty else "なし")
+
+
+@st.cache_data(ttl=3600, show_spinner="権利落ち日を計算中...")
+def get_next_ex_dates(tickers: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """次の権利落ち日（配当履歴からの予測）。"""
+    from modules.dividend_history import next_ex_dates
+    return next_ex_dates(list(tickers) if tickers else None)

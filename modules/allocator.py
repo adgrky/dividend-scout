@@ -25,11 +25,15 @@ import pandas as pd
 
 _LOT = 100  # 東証の売買単位（2018年以降は原則100株）
 
+# 単元未満株（1株から買える仕組み）。SBIのS株、楽天のかぶミニ、マネックスのワン株など。
+# 毎月の入金額で単元（10万〜70万円）を買えることは稀なので、こちらが既定。
+_ODD_LOT = 1
 
-def _lot_size(price: float, budget: float) -> int:
+
+def _lot_size(price: float, budget: float, lot: int = _LOT) -> int:
     if not price or price <= 0:
         return 0
-    return int(budget // (price * _LOT)) * _LOT
+    return int(budget // (price * lot)) * lot
 
 
 def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
@@ -137,7 +141,8 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
              per_name_cap_pct: float = 0.25,
              require_below_target: bool = True,
              month_gap: dict[int, float] | None = None,
-             allow_single_lot: bool = True) -> pd.DataFrame:
+             allow_single_lot: bool = True,
+             lot: int = _LOT) -> pd.DataFrame:
     """入金額を候補に割り振る。
 
     Parameters
@@ -151,8 +156,11 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
         目標利回りに届いている銘柄だけを対象にする
     allow_single_lot : bool
         上限に収まらなくても、1単元だけなら買うことを許す
+    lot : int
+        売買の刻み。100 なら単元、1 なら単元未満株（S株・かぶミニ・ワン株）。
+        毎月の入金で単元を買えることは稀なので、既定は1株。
 
-    【なぜ2周するか】
+    【なぜ2周するか】※ lot=1 のときは1周目でほぼ配り切れるので効きません
     日本株は100株単位でしか買えない。1単元の値段は10万〜70万円が普通なので、
     「1銘柄あたり入金の15%まで」といった上限を素直に当てると、単元がその上限を
     超える銘柄が全部落ちる。実測では、入金50万円（投入枠30万円）に対して
@@ -187,6 +195,11 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
 
     per_name_cap = cash * per_name_cap_pct
     single_lot_max = cash * float(config["buy_priority"].get("single_lot_max", 0.5))
+    lot = max(int(lot), 1)
+    # 端数で ¥297 のような細切れが1行できても、管理の手間が増えるだけで配当は増えない。
+    # 1銘柄あたりの最低金額を決めて、それに満たない配分は作らない。
+    min_ticket = max(float(config["buy_priority"].get("min_ticket_yen", 3000)),
+                     cash * float(config["buy_priority"].get("min_ticket_pct", 0.02)))
     remaining = cash
     picks = []
     taken: set = set()
@@ -194,7 +207,7 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
     def _try(r, cap_amount: float, relaxed: bool) -> bool:
         nonlocal remaining
         price = r["last_close"]
-        lot_cost = price * _LOT
+        lot_cost = price * lot
         if len(picks) >= max_names or remaining < lot_cost or r["ticker"] in taken:
             return False
         sector = r.get("sector33")
@@ -203,26 +216,59 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
         room = cap_sector * total_after - used
         if room <= 0 or lot_cost > room:
             return False
-        shares = _lot_size(price, min(cap_amount, remaining, room))
-        if shares < _LOT:
+        shares = _lot_size(price, min(cap_amount, remaining, room), lot)
+        if shares < lot:
             if not relaxed or lot_cost > min(remaining, room, single_lot_max):
                 return False
-            shares = _LOT          # 上限は超えるが1単元だけ入れる
+            shares = lot          # 上限は超えるが1単元だけ入れる
         amount = shares * price
+        if amount < min_ticket and remaining > min_ticket:
+            return False        # 細切れは作らない（お金が尽きかけている時だけ許す）
         picks.append(_pick(r, sector, shares, amount, cap_sector * total_after - used,
-                           relaxed and amount > cap_amount))
+                           relaxed and amount > cap_amount, lot))
         taken.add(r["ticker"])
         remaining -= amount
         return True
 
     for _, r in c.iterrows():
         _try(r, per_name_cap, relaxed=False)
-    if allow_single_lot:
+    if allow_single_lot and lot > 1:
         # 余ったお金で、上限を超えても1単元だけなら買う2周目
+        # （1株から買えるなら1周目で配り切れるので、この2周目は要らない）
         for _, r in c.iterrows():
             if remaining <= 0 or len(picks) >= max_names:
                 break
             _try(r, per_name_cap, relaxed=True)
+
+    # ── 端数の積み増し ──
+    # 1株単位で配ると、1銘柄ごとに「株価 − 1円」までの端数が残る。銘柄数の上限に
+    # 達していると新しい銘柄を足せないので、実測では入金10万円のうち1.2万円、
+    # 3万円のうち0.8万円が宙に浮いていた。すでに選んだ銘柄に1株ずつ積み増して埋める。
+    if lot == 1 and picks and remaining > 0:
+        topup_cap = per_name_cap * float(
+            config["buy_priority"].get("topup_cap_multiple", 1.5))
+        by_ticker = {p["ticker"]: p for p in picks}
+        progressed = True
+        while progressed and remaining > 0:
+            progressed = False
+            for _, r in c.iterrows():
+                pk = by_ticker.get(r["ticker"])
+                if pk is None:
+                    continue
+                price = pk["株価"]
+                if price <= 0 or price > remaining or pk["投入額"] + price > topup_cap:
+                    continue
+                sector = pk["業種"]
+                used = float(sector_now.get(sector, 0.0)) + sum(
+                    q["投入額"] for q in picks if q["業種"] == sector)
+                if price > cap_sector * total_after - used:
+                    continue
+                pk["株数"] += 1
+                pk["投入額"] += price
+                pk["年間配当"] = pk["投入額"] * (r.get("dividend_yield") or 0)
+                pk["概算手数料"] = _odd_lot_fee(pk["投入額"], pk["株数"], lot)
+                remaining -= price
+                progressed = True
 
     out = pd.DataFrame(picks)
     if not out.empty:
@@ -230,7 +276,7 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
     return out
 
 
-def _pick(r, sector, shares, amount, sector_room, relaxed: bool) -> dict:
+def _pick(r, sector, shares, amount, sector_room, relaxed: bool, lot: int) -> dict:
     return {
         "ticker": r["ticker"],
         "コード": r.get("code"),
@@ -253,7 +299,19 @@ def _pick(r, sector, shares, amount, sector_room, relaxed: bool) -> dict:
         "配当月": r.get("payout_months"),
         "業種の空き枠": max(sector_room, 0.0),
         "上限を超えて1単元": relaxed,
+        "概算手数料": _odd_lot_fee(amount, shares, lot),
     }
+
+
+def _odd_lot_fee(amount: float, shares: int, lot: int) -> float:
+    """単元未満株のおおよその手数料（スプレッド込み）。
+
+    単元未満株は売買手数料が無料でも **約定価格に 0.2〜0.5% のスプレッドが乗る**
+    ことが多い（SBIのS株は買い無料・売り0.55%、楽天のかぶミニはスプレッド0.22%）。
+    無視すると小口に配るほど有利に見えてしまうので、0.22% を概算で置いておく。
+    単元で買うなら手数料はほぼ無視できるので0。
+    """
+    return round(amount * 0.0022, 0) if lot < 100 else 0.0
 
 
 def rebalance_funds(review: pd.DataFrame) -> float:

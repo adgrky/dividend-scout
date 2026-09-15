@@ -157,24 +157,33 @@ with tab_buy:
             f"相場の水準に合わせる（いま【{regime_name}】＝{deploy_ratio:.0%}）", value=True,
             help="高い局面では入金を使い切らず、暴落に備えて現金に積みます")
         max_names = st.number_input(
-            "買う銘柄数の上限", 1, 40, 12,
+            "買う銘柄数", 1, 40, 12,
             help="ヘムは360〜400銘柄に超分散。機械的な基準で選び監視はアプリがやるので、"
                  "絞る理由は薄いです")
     with c3:
         min_yield = st.number_input("最低利回り（%）", 0.0, 8.0, 3.0, 0.25) / 100
-        per_cap = st.slider("1銘柄あたりの上限（投入額に対する比率）", 5, 100, 15, 5,
-                            format="%d%%",
-                            help="日本株は100株単位。1単元が10万〜70万円なので、"
-                                 "上限を低くすると単元が上限を超える銘柄が全部落ちます。"
-                                 "下の「1単元だけは上限を超えて買う」でその余りを配ります") / 100
+        odd_lot = st.checkbox(
+            "単元未満株（1株から）で買う", value=True,
+            help="SBIのS株、楽天のかぶミニ、マネックスのワン株など。"
+                 "毎月の入金で単元（10万〜70万円）を買えることは稀なので、こちらが既定です")
+        even = st.checkbox("選んだ銘柄数で均等に配る", value=True,
+                           help="外すと、1銘柄あたりの上限を自分で決められます") / 100
     with c4:
         scope = st.radio("対象", ["未保有のみ", "保有の買い増しも含む"], index=1)
         require_target = st.checkbox("目標利回りに届いている銘柄だけ", value=False,
                                      help="届いていないなら待つ、というヘムの型")
-        single_lot = st.checkbox("1単元だけは上限を超えて買う", value=True,
-                                 help="これを外すと、単元の値段が1銘柄あたりの上限を超える銘柄は"
-                                      "すべて落ちます（実測で投入枠30万円のうち9.9万円しか"
-                                      "配れませんでした）")
+        if even:
+            per_cap = 1.0 / float(max_names)
+            single_lot = True
+            st.caption(f"1銘柄あたり **{per_cap:.1%}**（＝入金 ÷ {int(max_names)} 銘柄）")
+        else:
+            per_cap = st.slider("1銘柄あたりの上限（投入額に対する比率）", 5, 100, 15, 5,
+                                format="%d%%") / 100
+            single_lot = st.checkbox(
+                "1単元だけは上限を超えて買う", value=True,
+                help="単元で買うときだけ効きます。外すと、単元の値段が上限を超える銘柄は"
+                     "すべて落ちます（実測で投入枠30万円のうち9.9万円しか配れませんでした）")
+    lot = 1 if odd_lot else 100
 
     cash = cash_in * (deploy_ratio if use_regime else 1.0)
     if use_regime and deploy_ratio < 1.0:
@@ -203,7 +212,7 @@ with tab_buy:
 
     plan = allocate(cash, cand, positions, config, max_names=int(max_names),
                     per_name_cap_pct=float(per_cap), require_below_target=require_target,
-                    month_gap=gaps, allow_single_lot=single_lot)
+                    month_gap=gaps, allow_single_lot=single_lot, lot=lot)
 
     st.divider()
     if plan.empty:
@@ -223,25 +232,37 @@ with tab_buy:
 
         # 内訳を必ず出す。合計だけ出していたときは「入金50万・投入枠30万」と
         # 言いながら「現金に積む 40万」と表示され、何が起きているか分からなかった。
+        unit_word = "1株の端数" if lot == 1 else "単元（100株）に丸めた端数"
         st.caption(
             f"**入金 {yen(cash_in)}**　＝　投入 {yen(total_in)}　＋　"
             f"暴落用に取っておく {yen(reserve_part)}（【{regime_name}】のため入金の "
-            f"{1 - deploy_ratio:.0%}）　＋　単元に丸めて余った {yen(leftover)}"
+            f"{1 - deploy_ratio:.0%}）　＋　{unit_word} {yen(leftover)}"
             if use_regime and deploy_ratio < 1.0 else
-            f"**入金 {yen(cash_in)}**　＝　投入 {yen(total_in)}　＋　"
-            f"単元（100株）に丸めて余った {yen(leftover)}")
+            f"**入金 {yen(cash_in)}**　＝　投入 {yen(total_in)}　＋　{unit_word} {yen(leftover)}")
         if leftover > 0:
-            cheapest = (cand["last_close"].min() * 100) if not cand.empty else 0
-            st.caption(
-                f"余った {yen(leftover)} は、**100株単位で買えるものが無くなった**ぶんです"
-                f"（いちばん安い候補でも1単元 {yen(cheapest)}）。"
-                + ("銘柄数の上限を上げるか、1銘柄あたりの上限をゆるめると配り切れます。"
-                   if len(plan) >= int(max_names) or not single_lot else
-                   "次の入金に足すか、暴落用の現金に回してください。"))
+            cheapest = (cand["last_close"].min() * lot) if not cand.empty else 0
+            if lot == 1:
+                st.caption(f"余った {yen(leftover)} は、**1株の端数**です"
+                           f"（いちばん安い候補でも1株 {yen(cheapest)}）。"
+                           "次の入金に足してください。")
+            else:
+                st.caption(
+                    f"余った {yen(leftover)} は、**100株単位で買えるものが無くなった**ぶんです"
+                    f"（いちばん安い候補でも1単元 {yen(cheapest)}）。"
+                    "「単元未満株（1株から）で買う」に入れると、ほぼ全額を配れます。")
         n_relaxed = int(plan.get("上限を超えて1単元", pd.Series(dtype=bool)).sum())
         if n_relaxed:
             st.caption(f"うち **{n_relaxed} 銘柄**は、1単元の値段が上限を超えていますが"
                        "「1単元だけは上限を超えて買う」に従って入れています。")
+        fee = float(plan["概算手数料"].sum())
+        if fee > 0:
+            st.caption(
+                f"⚠️ **単元未満株は約定価格にスプレッドが乗ります**（0.2〜0.5%程度。"
+                f"SBIのS株は買い無料・売り0.55%、楽天のかぶミニは0.22%）。"
+                f"今回の概算は **{yen(fee)}**（0.22%で計算）。"
+                f"増える年間配当 {yen(total_div)} に対して {fee / total_div:.1%} なので、"
+                + ("**1年目で十分に回収できます**。" if fee < total_div * 0.3 else
+                   "**配り先を絞って1銘柄あたりを大きくしたほうがよいかもしれません**。"))
         n_sec = plan["業種"].nunique()
         if n_sec < max(3, len(plan) // 2):
             top_sec = plan.groupby("業種")["投入額"].sum().idxmax()
@@ -251,8 +272,13 @@ with tab_buy:
 
         show = plan[["コード", "銘柄名", "業種", "配当月", "株価", "株数", "投入額", "利回り",
                      "年間配当", "買い付け優先度", "割安度", "自己利回り順位", "絶対利回り順位",
-                     "継続", "補完度", "発掘スコア", "上限を超えて1単元"]].copy()
+                     "継続", "補完度", "発掘スコア", "上限を超えて1単元",
+                     "概算手数料"]].copy()
         show = show.rename(columns={"上限を超えて1単元": "上限超"})
+        if lot == 1:
+            show = show.drop(columns=["上限超"])
+        else:
+            show = show.drop(columns=["概算手数料"])
         show["利回り"] = to_pct(show["利回り"])
         show["税引後配当"] = (show["年間配当"] * (1 - tax)).round(0)
         for c in ("買い付け優先度", "割安度", "自己利回り順位", "絶対利回り順位",
@@ -277,9 +303,13 @@ with tab_buy:
             "上限超": st.column_config.CheckboxColumn(
                 help="1単元の値段が「1銘柄あたりの上限」を超えているが、"
                      "1単元だけ入れた銘柄"),
+            "概算手数料": st.column_config.NumberColumn(
+                format="¥%d", help="単元未満株のスプレッド見込み（0.22%で計算）"),
         })
-        st.caption("株数は単元（100株）に丸めています。**買い付け優先度の順に**、"
-                   "業種の上限と1銘柄あたりの上限を守りながら埋めています。")
+        st.caption(("株数は**1株単位**です（単元未満株）。" if lot == 1 else
+                    "株数は単元（100株）に丸めています。")
+                   + "**買い付け優先度の順に**、業種の上限と1銘柄あたりの上限を守りながら"
+                     "埋めています。")
 
         with st.expander("なぜこの式なのか"):
             st.markdown("""
@@ -335,7 +365,7 @@ with tab_buy:
                 "記録する": st.column_config.CheckboxColumn(),
                 "コード": st.column_config.TextColumn(disabled=True),
                 "銘柄名": st.column_config.TextColumn(disabled=True),
-                "株数": st.column_config.NumberColumn(min_value=0, step=100),
+                "株数": st.column_config.NumberColumn(min_value=0, step=1),
                 "約定単価": st.column_config.NumberColumn(format="¥%.1f", min_value=0.0)})
         buy_date = st.date_input("約定日", value=date.today(), key="buy_date")
         if st.button("この内容で買ったことにする", type="primary"):
@@ -491,7 +521,7 @@ with tab_sell:
                            key=f"act_{r['account']}_{r['ticker']}", horizontal=False)
         with d2:
             sh = st.number_input("売った株数", 0.0, float(r["shares"]),
-                                 float(r["shares"]), 100.0,
+                                 float(r["shares"]), 1.0,
                                  key=f"sh_{r['account']}_{r['ticker']}")
         with d3:
             pr = st.number_input("約定単価（円）", 0.0, 10_000_000.0,

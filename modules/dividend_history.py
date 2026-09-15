@@ -220,3 +220,75 @@ def profiles_to_frame(profiles: dict[str, DividendProfile]) -> pd.DataFrame:
         d.pop("series", None)
         rows.append(d)
     return pd.DataFrame(rows).set_index("ticker")
+
+
+def next_ex_dates(tickers: list[str] | None = None, lookback_years: int = 3,
+                  horizon_days: int = 400) -> pd.DataFrame:
+    """次の権利落ち日を、配当履歴から予測する。
+
+    【なぜ予測するか】
+    yfinance の ex_dividend_date は実測で **1,272社のうち5社しか入っていない**
+    （保有86銘柄では0件）。そのままでは使えない。
+
+    日本株の権利落ち日は決算期末に固定されていて、実質「その月の最終営業日」。
+    3月期末の会社なら毎年3月末と9月末に落ちる。だから過去の権利落ち月が
+    分かれば、次がいつかはかなり正確に置ける。
+
+    **予測であって会社の発表ではない**ので、画面では必ずそう書くこと。
+    """
+    from modules.store import read_df
+    if tickers:
+        ph = ",".join("?" * len(tickers))
+        div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({ph})",
+                      tuple(tickers))
+    else:
+        div = read_df("SELECT ticker, date, amount FROM dividends")
+    if div.empty:
+        return pd.DataFrame(columns=["ticker", "次の権利落ち日", "あと何日", "1株配当の目安", "根拠"])
+
+    div["date"] = pd.to_datetime(div["date"])
+    today = pd.Timestamp.today().normalize()
+    recent = div[div["date"] >= today - pd.DateOffset(years=lookback_years)]
+    if recent.empty:
+        return pd.DataFrame(columns=["ticker", "次の権利落ち日", "あと何日", "1株配当の目安", "根拠"])
+
+    rows = []
+    for ticker, g in recent.groupby("ticker"):
+        g = g.sort_values("date")
+        best = None
+        for month, mg in g.groupby(g["date"].dt.month):
+            last = mg.iloc[-1]
+            hist_day = int(last["date"].day)
+            # 月末に張り付いているか（その月の最終営業日かどうか）を見る
+            month_end = last["date"] + pd.offsets.MonthEnd(0)
+            at_month_end = (month_end - last["date"]).days <= 3
+
+            for add_year in (0, 1):
+                year = today.year + add_year
+                try:
+                    if at_month_end:
+                        cand = pd.Timestamp(year=year, month=int(month), day=1) \
+                            + pd.offsets.MonthEnd(0)
+                        # 最終営業日にずらす（土日なら手前の金曜）
+                        while cand.weekday() >= 5:
+                            cand -= pd.Timedelta(days=1)
+                    else:
+                        cand = pd.Timestamp(year=year, month=int(month), day=hist_day)
+                except ValueError:
+                    continue
+                if cand <= today or (cand - today).days > horizon_days:
+                    continue
+                if best is None or cand < best[0]:
+                    best = (cand, float(last["amount"]), int(month))
+                break
+        if best:
+            rows.append({
+                "ticker": ticker,
+                "次の権利落ち日": best[0].date(),
+                "あと何日": int((best[0] - today).days),
+                "1株配当の目安": best[1],
+                "根拠": f"前年の{best[2]}月の権利落ち日から",
+            })
+    return pd.DataFrame(rows).sort_values("次の権利落ち日").reset_index(drop=True) \
+        if rows else pd.DataFrame(columns=["ticker", "次の権利落ち日", "あと何日",
+                                           "1株配当の目安", "根拠"])

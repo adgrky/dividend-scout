@@ -233,6 +233,12 @@ def run_scoring(config: dict, asof: str | None = None,
     for col in ["total", "capacity", "willingness", "growth", "neglect", "valuation",
                 "trap_penalty", "detail_json"]:
         out[col] = scores[col] if col in scores.columns else None
+    # ゲートを外れた銘柄には、層ごとの順位は無いが実数だけは残す。
+    # 保有のカルテ・売り判定・同業比較がここを読む。
+    if not health.empty and "raw_json" in health.columns:
+        out["detail_json"] = out["detail_json"].fillna(health["raw_json"])
+    # トラップ減点も基準を外れた銘柄に付ける（売り判定が使う）
+    out["trap_penalty"] = out["trap_penalty"].fillna(penalty)
     out["asof"] = asof
     out = out.reset_index().rename(columns={"index": "ticker"})
     upsert_df("scores", out, _SCORE_COLS)
