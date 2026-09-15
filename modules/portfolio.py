@@ -278,3 +278,34 @@ def expected_dividends(pos: pd.DataFrame, config: dict, months_back: int = 12,
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(["受取日", "銘柄名"]).reset_index(drop=True)
+
+
+def freed_cash(days: int = 30) -> dict:
+    """整理して生まれた、まだ使っていないお金。
+
+    ケンの使い方は
+        入金額を入れる → アプリが銘柄と株数を出す → 買う
+        → 同時に整理すべきものを売る → 生まれた余力で同じことを繰り返す
+    というループ。売ったあとに金額を手で足し算して打ち直すのでは続かないので、
+    **売った手取りから、その後に買った額を引いた残り**を出す。
+    買い付けを記録すれば自然にゼロへ戻るので、二重に使ってしまうことがない。
+
+    手取りは税引後。特定口座では売却益に 20.315% かかるので、
+    売却代金をそのまま次の買い付けに回すと金額が合わない。
+    """
+    tx = read_df(
+        "SELECT date, type, shares, price, COALESCE(tax, 0) AS tax FROM transactions "
+        "WHERE type IN ('buy','sell') AND date >= date('now', ?)", (f"-{int(days)} day",))
+    if tx.empty:
+        return {"手取り": 0.0, "使った額": 0.0, "残り": 0.0, "売却件数": 0, "買い付け件数": 0}
+    amount = tx["shares"] * tx["price"]
+    sells = tx["type"] == "sell"
+    proceeds = float((amount[sells] - tx.loc[sells, "tax"]).sum())
+    spent = float(amount[~sells].sum())
+    return {
+        "手取り": round(proceeds, 0),
+        "使った額": round(spent, 0),
+        "残り": round(max(proceeds - spent, 0.0), 0),
+        "売却件数": int(sells.sum()),
+        "買い付け件数": int((~sells).sum()),
+    }

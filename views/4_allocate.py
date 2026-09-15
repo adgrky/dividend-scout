@@ -22,7 +22,7 @@ import streamlit as st
 from modules import market, review as R, sell_rules as SR
 from modules.allocator import allocate, buy_gate, buy_priority, month_gaps, rebalance_funds
 from modules.format import to_pct, yen, yen_short
-from modules.portfolio import dividend_calendar, sector_exposure
+from modules.portfolio import dividend_calendar, freed_cash, sector_exposure
 from modules.store import connect, read_df
 from modules.ui import flash, show_flash, get_config, get_positions, get_scores, no_data_guard
 
@@ -54,14 +54,18 @@ snap = _market()
 regime_name, deploy_ratio, regime_note = market.regime(snap, config)
 
 def _record_sell(account: str, ticker: str, name: str, shares: float,
-                 price: float, when) -> None:
-    """売却を記録して、保有の株数をその場で減らす。全部売れば保有から消す。"""
+                 price: float, when, tax: float = 0.0) -> None:
+    """売却を記録して、保有の株数をその場で減らす。全部売れば保有から消す。
+
+    税額も一緒に残す。「整理して生まれたお金をそのまま次の買い付けに回す」ときに、
+    税引後の手取りでないと金額が合わないため。
+    """
     with connect() as conn:
         conn.execute(
             "INSERT INTO transactions (date, account, ticker, name, type, shares, price, "
-            "fee, memo) VALUES (?, ?, ?, ?, 'sell', ?, ?, 0, ?)",
+            "fee, memo, tax) VALUES (?, ?, ?, ?, 'sell', ?, ?, 0, ?, ?)",
             (when.isoformat(), account, ticker, name, float(shares), float(price),
-             "整理タブから記録"))
+             "整理タブから記録", float(tax)))
         cur = conn.execute("SELECT shares FROM holdings WHERE account=? AND ticker=?",
                            (account, ticker)).fetchone()
         left = (float(cur["shares"]) if cur else 0.0) - float(shares)
@@ -80,15 +84,20 @@ tab_market, tab_buy, tab_sell = st.tabs(["📉 相場と現金", "🛒 買う", 
 with tab_market:
     st.caption("ヘムの3本目の柱「暴落時の買い向かい」。"
                "現金を残しておき、下がるほど多く入れるための材料です。")
+    # 4つ横に並ぶので、単位は見出しに逃がして値は数字だけにする。
+    # 「63,484 円」のまま入れると、窓が狭いときに「63,48…」と切れる。
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("日経平均", f"{snap.get('nikkei', 0):,.0f} 円" if snap.get("nikkei") else "—")
-    c2.metric("日経平均PBR", f"{snap.get('pbr', 0):.2f} 倍" if snap.get("pbr") else "—",
+    c1.metric("日経平均（円）",
+              f"{snap.get('nikkei', 0):,.0f}" if snap.get("nikkei") else "—",
+              help="終値。週足の最新")
+    c2.metric("日経平均PBR", f"{snap.get('pbr', 0):.2f}" if snap.get("pbr") else "—",
               help="株価が1株純資産の何倍か。リーマン・ショックのときは0.8倍まで下がりました")
-    c3.metric("過去10年での位置",
+    c3.metric("10年での位置",
               f"上位 {1 - snap['pct_10y']:.0%}" if snap.get("pct_10y") is not None else "—",
               help="日経平均が、過去10年の分布の中でどのあたりか")
     c4.metric("200日線との差",
-              f"{snap['vs_ma200']:+.1%}" if snap.get("vs_ma200") is not None else "—")
+              f"{snap['vs_ma200']:+.1%}" if snap.get("vs_ma200") is not None else "—",
+              help="200日移動平均からどれだけ離れているか")
 
     color = {"総力戦": "error", "大人買い": "error", "買い増し": "success",
              "平常": "info", "やや高い": "warning", "高い": "warning"}.get(regime_name, "info")
@@ -146,9 +155,24 @@ with tab_market:
 
 # ═══════════════════════════════════════════════ 買う
 with tab_buy:
+    # ── 整理して生まれたお金を、そのまま次の買い付けに回せるようにする ──
+    # 売ったあとに金額を手で足し算して打ち直すのでは、この使い方は続かない。
+    freed = freed_cash(30)
+    if freed["残り"] > 0:
+        st.success(
+            f"🔁 **整理して生まれた余力が {yen(freed['残り'])} 残っています**"
+            f"（直近30日に {freed['売却件数']} 件売った手取り {yen(freed['手取り'])} − "
+            f"その後 {freed['買い付け件数']} 件買った {yen(freed['使った額'])}）。\n\n"
+            "下の「整理で生まれた余力」に入れてあります。買い付けを記録すれば自動で減ります。")
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        cash_in = st.number_input("入金額（円）", 0, 100_000_000, 500_000, 50_000, format="%d")
+        cash_in = st.number_input("入金額（円）", 0, 100_000_000, 500_000, 50_000, format="%d",
+                                  help="トレード利益から新しく入れるお金")
+        swap_in = st.number_input(
+            "整理で生まれた余力（円）", 0, 100_000_000, int(freed["残り"]), 10_000, format="%d",
+            help="持ち株を整理して作ったお金。**相場の水準による絞り込みはかけません**。"
+                 "同じ市場の中で乗り換えるだけで、新しく市場に踏み込むわけではないからです")
         account = st.radio("入れる口座", ["specific", "nisa"], index=0,
                            format_func=lambda a: "特定口座（課税 20.315%）" if a == "specific"
                            else "NISA（非課税）",
@@ -168,7 +192,7 @@ with tab_buy:
             help="SBIのS株、楽天のかぶミニ、マネックスのワン株など。"
                  "毎月の入金で単元（10万〜70万円）を買えることは稀なので、こちらが既定です")
         even = st.checkbox("選んだ銘柄数で均等に配る", value=True,
-                           help="外すと、1銘柄あたりの上限を自分で決められます") / 100
+                           help="外すと、1銘柄あたりの上限を自分で決められます")
     with c4:
         scope = st.radio("対象", ["未保有のみ", "保有の買い増しも含む"], index=1)
         require_target = st.checkbox("目標利回りに届いている銘柄だけ", value=False,
@@ -186,10 +210,22 @@ with tab_buy:
                      "すべて落ちます（実測で投入枠30万円のうち9.9万円しか配れませんでした）")
     lot = 1 if odd_lot else 100
 
-    cash = cash_in * (deploy_ratio if use_regime else 1.0)
-    if use_regime and deploy_ratio < 1.0:
-        st.info(f"【{regime_name}】のため、入金 {yen(cash_in)} のうち **{yen(cash)}** を投入し、"
-                f"**{yen(cash_in - cash)}** は暴落用の現金に積みます。")
+    # 相場の水準による絞り込みは「新しく入れるお金」にだけかける。
+    # 整理して作ったお金は、同じ市場の中で乗り換えるだけなので絞らない。
+    # ここを一緒くたに絞ると、整理するたびに市場から少しずつ降りることになる。
+    cash_from_deposit = cash_in * (deploy_ratio if use_regime else 1.0)
+    cash = cash_from_deposit + swap_in
+    if use_regime and deploy_ratio < 1.0 and cash_in > 0:
+        msg = (f"【{regime_name}】のため、入金 {yen(cash_in)} のうち "
+               f"**{yen(cash_from_deposit)}** を投入し、"
+               f"**{yen(cash_in - cash_from_deposit)}** は暴落用の現金に積みます。")
+        if swap_in > 0:
+            msg += (f"\n\n整理で作った {yen(swap_in)} は**そのまま全額**入れます"
+                    "（乗り換えなので絞りません）。合わせて **" + yen(cash) + "** を配ります。")
+        st.info(msg)
+    elif swap_in > 0:
+        st.info(f"入金 {yen(cash_from_deposit)} ＋ 整理で作った {yen(swap_in)} "
+                f"＝ **{yen(cash)}** を配ります。")
 
     held = set(positions["ticker"]) if not positions.empty else set()
     cand = scores[scores["gate_passed"] == 1].copy().reset_index(drop=True)
@@ -222,25 +258,27 @@ with tab_buy:
         tax = config["portfolio"]["tax_rate_nisa"] if account == "nisa" \
             else config["portfolio"]["tax_rate_specific"]
         total_in, total_div = plan["投入額"].sum(), plan["年間配当"].sum()
-        reserve_part = cash_in - cash          # 相場の水準に応じて意図的に残したぶん
+        reserve_part = cash_in - cash_from_deposit   # 相場の水準に応じて意図的に残したぶん
         leftover = cash - total_in             # 単元に丸めきれず余ったぶん
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("投入額", yen(total_in))
         c2.metric("増える配当／年", yen(total_div), help="税引前")
         c3.metric("税引後", yen(total_div * (1 - tax)),
                   help="NISAは非課税、特定口座は20.315%を引いています")
-        c4.metric("残る現金", yen(cash_in - total_in),
+        c4.metric("残る現金", yen(cash_in + swap_in - total_in),
                   help="暴落用に取っておくぶんと、単元に丸めて余ったぶんの合計")
 
         # 内訳を必ず出す。合計だけ出していたときは「入金50万・投入枠30万」と
         # 言いながら「現金に積む 40万」と表示され、何が起きているか分からなかった。
         unit_word = "1株の端数" if lot == 1 else "単元（100株）に丸めた端数"
+        src = (f"**入金 {yen(cash_in)}**" if swap_in == 0 else
+               f"**入金 {yen(cash_in)} ＋ 整理で作った {yen(swap_in)}**")
         st.caption(
-            f"**入金 {yen(cash_in)}**　＝　投入 {yen(total_in)}　＋　"
+            f"{src}　＝　投入 {yen(total_in)}　＋　"
             f"暴落用に取っておく {yen(reserve_part)}（【{regime_name}】のため入金の "
             f"{1 - deploy_ratio:.0%}）　＋　{unit_word} {yen(leftover)}"
-            if use_regime and deploy_ratio < 1.0 else
-            f"**入金 {yen(cash_in)}**　＝　投入 {yen(total_in)}　＋　{unit_word} {yen(leftover)}")
+            if use_regime and deploy_ratio < 1.0 and cash_in > 0 else
+            f"{src}　＝　投入 {yen(total_in)}　＋　{unit_word} {yen(leftover)}")
         if leftover > 0:
             cheapest = (cand["last_close"].min() * lot) if not cand.empty else 0
             if lot == 1:
@@ -564,7 +602,8 @@ with tab_sell:
             elif sh <= 0:
                 st.warning("売った株数を入れてください")
             else:
-                _record_sell(r["account"], r["ticker"], r["name"], sh, pr, sd)
+                _record_sell(r["account"], r["ticker"], r["name"], sh, pr, sd,
+                             tax=_tax(r, sh, pr))
                 flash(f"✅ {r['name']} を {sh:,.0f} 株 {yen(sh * pr)} で売却として記録しました。"
                       "ポートフォリオの株数に反映されています。")
                 st.cache_data.clear()

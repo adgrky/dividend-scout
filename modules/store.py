@@ -152,7 +152,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     price   REAL,
     fee     REAL,
     memo    TEXT,
-    ref_date TEXT                    -- 配当なら権利落ち日。二重計上を防ぐ鍵
+    ref_date TEXT,                   -- 配当なら権利落ち日。二重計上を防ぐ鍵
+    tax     REAL                     -- 売却時にかかる税額（特定口座）。手取りの計算に使う
 );
 
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -291,6 +292,9 @@ _MIGRATIONS = [
     # （実測: 入金までの日数を75日→45日にすると、記録済みの222件が再び未記録として出た）。
     # 権利落ち日は動かないので、こちらを鍵にする。
     ("transactions", "ref_date", "TEXT"),
+    # 売ったときの税額。整理で生まれた「手取り」を正確に積み上げて、
+    # そのお金をそのまま次の買い付けに回せるようにする。
+    ("transactions", "tax", "REAL"),
 ]
 
 
