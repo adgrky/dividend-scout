@@ -1,0 +1,6 @@
+[server]
+# Streamlit Cloud で OSError: [Errno 24] inotify instance limit reached を踏んだため
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false

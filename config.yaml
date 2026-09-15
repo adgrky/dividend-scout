@@ -1,0 +1,62 @@
+# dividend-scout 設定
+# 閾値・重みはすべてここに集約する。コードに数値を直書きしない。
+
+universe:
+  # 対象市場（JPX data_j.xlsx の「市場・商品区分」の値）
+  markets:
+    - "プライム（内国株式）"
+    - "スタンダード（内国株式）"
+    - "グロース（内国株式）"
+  # 除外業種（銀行・保険は財務指標の意味が違うため別ゲートで扱う）
+  financial_sectors:
+    - "銀行業"
+    - "保険業"
+    - "証券、商品先物取引業"
+  bulk_batch_size: 100      # yf.download に一度に渡す銘柄数
+  price_period: "max"       # 配当履歴を最大限取るため
+
+# ---- ゲート（通らない銘柄はスコア計算すらしない）----
+gate:
+  min_listing_years: 5
+  min_market_cap_oku: 100          # 億円
+  min_avg_turnover_man: 3000       # 20日平均売買代金（万円）
+  max_dividend_cuts_10y: 1         # 直近10年の減配回数
+  min_positive_ocf_years: 4        # 直近5期のうち営業CFプラスの期数
+  min_equity_ratio: 0.30           # 自己資本比率（金融を除く）
+  min_equity_ratio_financial: 0.04 # 金融は別基準
+  max_payout_ratio: 0.70
+  max_fcf_payout_ratio: 1.00
+  max_loss_years_5y: 1
+  min_dividend_years: 5            # 配当実績が5年未満は判定不能として除外
+
+# ---- スコア重み ----
+# 初期値はすべて等ウェイト。scripts/validate_score.py の検証を通った層だけ
+# 重みを上げる。直感で動かさない。
+weights:
+  capacity: 1.0      # A 増配余力
+  willingness: 1.0   # B 増配意思
+  growth: 1.0        # C 原資成長
+  neglect: 1.0       # D 見過ごされ度
+  valuation: 1.0     # E 割安
+  trap_penalty: 1.0  # F 減点の効き具合
+
+scoring:
+  payout_ideal_low: 0.30      # 配当性向のスイートスポット
+  payout_ideal_high: 0.50
+  payout_too_low: 0.15        # これ未満は還元意思なしとして減点
+  yield_percentile_window_years: 7
+  dps_cagr_years: [5, 10]
+
+traps:
+  extreme_yield: 0.065        # これ超＋52週安値圏は減配織り込みを疑う
+  near_low_threshold: 0.15    # 52週レンジ下位15%を「安値圏」とする
+  accrual_gap_threshold: 0.30 # 純利益と営業CFの乖離率
+
+portfolio:
+  tax_rate_specific: 0.20315  # 特定口座
+  tax_rate_nisa: 0.0
+  max_sector_weight: 0.20     # 33業種ベースの上限（目安表示用）
+
+paths:
+  db: "data/scout.db"
+  legacy_dir: "../portfolio-manager/data"

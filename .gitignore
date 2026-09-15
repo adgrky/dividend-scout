@@ -1,0 +1,20 @@
+# データ（DBとキャッシュはローカルが正）
+data/*.db
+data/*.db-journal
+data/cache/
+data/*.pkl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# 環境変数・秘密
+.env
+.streamlit/secrets.toml
+
+# macOS
+.DS_Store
+*.swp
+*.log

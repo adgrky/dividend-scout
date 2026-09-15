@@ -1,0 +1,11 @@
+# Streamlit 1.46 以降でないと width="stretch" が TypeError になる。
+# チャート類まで揃うのは 1.50。
+streamlit>=1.50,<2
+pandas<3
+numpy>=1.26
+yfinance>=1.3.0
+plotly>=5.20
+PyYAML>=6
+requests>=2.31
+python-dotenv>=1
+openpyxl>=3.1   # JPX data_j.xlsx を読むため
