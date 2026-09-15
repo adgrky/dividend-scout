@@ -150,6 +150,21 @@ def main() -> None:
                      f"利回り {r['dividend_yield']:.2%} 連続増配 {int(r['streak'] or 0)}年 "
                      f"{r['sector33']}")
 
+    # 相場の水準を記録する。日経のサイトは当月ぶんしか返さないので、
+    # スキャンのたびに貯めて自前の履歴を作る。
+    try:
+        from modules import market
+        pbr = market.fetch_nikkei_pbr()
+        price = market.fetch_nikkei_price()
+        snap = market.snapshot(price, pbr)
+        if snap:
+            market.record_snapshot(snap, pbr)
+            name, ratio, _ = market.regime(snap, config)
+            _log(f"相場: 日経平均 {snap.get('nikkei', 0):,.0f}円 / "
+                 f"PBR {snap.get('pbr', 0):.2f}倍 → 【{name}】入金の {ratio:.0%} を投入")
+    except Exception as exc:
+        _log(f"相場の記録に失敗（続行）: {exc}")
+
     prof = summarize_dividends()
     n_payers = int((prof["years_paying"] >= 5).sum()) if not prof.empty else 0
     n_streak5 = int((prof["streak"] >= 5).sum()) if not prof.empty else 0

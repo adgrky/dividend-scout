@@ -21,6 +21,8 @@ ORM は使わず生 SQL。DB はローカルが唯一の正で、保有情報は
     edinet_summary 有報の「主要な経営指標等の推移」5年分（日本基準の正確な値）
     company_profile 事業の内容・従業員数・権利確定日・会社予想配当
     settings      key-value
+    market_history 日経平均とPBRの日次記録（暴落時の買い向かいの判断に使う）
+    holding_review 整理の判断（持ち続ける/様子見）。同じ銘柄が毎回並ばないように
 """
 from __future__ import annotations
 
@@ -219,6 +221,24 @@ CREATE TABLE IF NOT EXISTS company_profile (
     policy_flags    TEXT,    -- 累進配当・DOE・配当性向目標などの検出結果（JSON）
     policy_score    REAL,    -- 0〜1。増配意思スコアに使う
     updated_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS market_history (   -- 相場の水準（自前で貯める）
+    date            TEXT PRIMARY KEY,
+    nikkei          REAL,
+    pbr_weighted    REAL,
+    pbr_index       REAL,
+    pct_10y         REAL,
+    vs_ma200        REAL
+);
+
+CREATE TABLE IF NOT EXISTS holding_review (   -- 整理の判断を覚えておく
+    account     TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    decision    TEXT,               -- keep（持ち続ける）/ watch（様子見）/ sold（売った）
+    decided_at  TEXT,
+    note        TEXT,
+    PRIMARY KEY (account, ticker)
 );
 
 CREATE TABLE IF NOT EXISTS scan_runs (

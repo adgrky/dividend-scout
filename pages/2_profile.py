@@ -53,15 +53,21 @@ company = read_df("SELECT * FROM company_profile WHERE ticker = ?", (ticker,))
 edinet = read_df("SELECT * FROM edinet_summary WHERE ticker = ? ORDER BY fiscal_year", (ticker,))
 
 # ── ヘッダー ──
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("発掘スコア", f"{row['total']:.1f}" if pd.notna(row["total"]) else "—",
+# 指標を6つ横に並べると、窓が狭いときに値が「¥2,…」と切れて読めなくなる。3つずつ2段にする。
+c1, c2, c3 = st.columns(3)
+c1.metric("株価", yen(row.get("last_close")))
+c2.metric("利回り（実績）", pct(raw.get("dividend_yield"), 2))
+c3.metric("連続増配 ／ 10年の減配",
+          f"{int(prof['streak'])} 年 ／ {int(prof['cuts_10y'])} 回")
+
+c4, c5, c6 = st.columns(3)
+c4.metric("発掘スコア", f"{row['total']:.1f}" if pd.notna(row["total"]) else "—",
           help="市場にまだ気づかれていない増配候補としての点数。大型株は構造的に低く出ます")
-c2.metric("配当継続スコア", f"{row['health']:.1f}" if pd.notna(row.get("health")) else "—",
+c5.metric("配当継続スコア", f"{row['health']:.1f}" if pd.notna(row.get("health")) else "—",
           help="配当が続くか・増えるかだけを見た点数。持っている株の評価はこちら")
-c3.metric("株価", yen(row.get("last_close")))
-c4.metric("利回り（実績）", pct(raw.get("dividend_yield"), 2))
-c5.metric("連続増配", f"{int(prof['streak'])} 年")
-c6.metric("10年の減配", f"{int(prof['cuts_10y'])} 回")
+hem_h = raw.get("hem_ratio")
+c6.metric("ヘム指数", f"{hem_h:.2f}" if hem_h else "—",
+          help="配当利回り×10 ÷ 配当性向。1.00以上でヘムの基準を満たす")
 
 if row["gate_passed"] != 1:
     st.error(f"**採用基準を外れている**：{row['gate_reason']}")

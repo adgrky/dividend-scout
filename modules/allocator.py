@@ -34,8 +34,25 @@ def _lot_size(price: float, budget: float) -> int:
 
 def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
                  month_gap: dict[int, float] | None = None) -> pd.DataFrame:
-    """買い付け優先度（0〜100）と、その内訳を付けて返す。"""
-    w = config["buy_priority"]
+    """買い付け優先度（0〜100）と、その内訳を付けて返す。
+
+    【なぜ加重和ではなく幾何平均か】
+    加重和だと「片方が極端に高ければ、もう片方が低くても選ばれる」。
+    実測すると『割安度80超・配当継続35未満』の銘柄が13件あり、加重和では
+    69点で上位に入っていた（小松マテーレ 割安95・継続34 など）。
+    配当投資では「安いが配当が危ない」も「安全だが高い」もどちらも買いたくない。
+    **両方そろって初めて買う**という性質を、そのまま式にする。
+
+        割安度100・継続100 → 100
+        割安度100・継続25  →  50   （加重和なら68になってしまう）
+        割安度60・継続60   →  60
+
+    補完度は順位を大きく動かすものではなく、同点のときに
+    「空いている業種・空いている配当月を埋めるほう」を選ぶための係数（±10%）。
+
+    トラップ減点は必ず引く。実測で、引かないと買い付け上位50のうち7銘柄が
+    高配当トラップ判定（最大19点）の銘柄だった。
+    """
     cap = config["portfolio"]["max_sector_weight"]
     total_eval = positions["eval_value"].sum() if not positions.empty else 0.0
     sector_now = (positions.groupby("sector33")["eval_value"].sum()
@@ -43,17 +60,22 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
 
     c = cand.copy()
 
-    # 割安度：自己利回り順位をそのまま 0〜100 に
-    c["_割安度"] = (c["yield_percentile"].fillna(0.5) * 100).clip(0, 100)
+    # ── 割安度 ──
+    # 「安い」には2つの意味がある。
+    #   自己利回り順位 … その銘柄自身の過去と比べて安いか（買う時期の判断）
+    #   絶対利回り順位 … 候補の中で利回りが高いか（いま受け取れる額）
+    # 前者だけだと「いつも1.5%の銘柄が2.0%」を最高評価してしまい、
+    # インカムとしては物足りない銘柄が上位に来る。両方を混ぜる。
+    self_rank = (c["yield_percentile"].fillna(0.5) * 100).clip(0, 100)
+    abs_rank = c["dividend_yield"].rank(pct=True) * 100
+    c["_割安度"] = (0.6 * self_rank + 0.4 * abs_rank.fillna(50)).clip(0, 100)
+    c["_自己利回り順位"] = self_rank
+    c["_絶対利回り順位"] = abs_rank.fillna(50)
 
-    # 配当継続
+    # ── 配当の質 ──
     c["_継続"] = c["health"].fillna(0).clip(0, 100)
 
-    # 目標到達度：現在利回り ÷ 目標利回り。届いていれば100点、半分なら50点。
-    tgt = c["target_yield"].fillna(0.047).replace(0, np.nan)
-    c["_目標到達"] = (c["dividend_yield"] / tgt * 100).clip(0, 100).fillna(0)
-
-    # 補完度：業種の空き枠と、配当月の空きの平均
+    # ── 補完度（タイブレーク）──
     if total_eval > 0:
         used = c["sector33"].map(sector_now).fillna(0.0)
         room = ((cap * total_eval - used) / (cap * total_eval)).clip(0, 1)
@@ -70,11 +92,30 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
         month_fit = pd.Series(0.5, index=c.index)
     c["_補完度"] = ((room + month_fit) / 2 * 100).clip(0, 100)
 
-    c["買い付け優先度"] = (
-        c["_割安度"] * w["valuation"] + c["_継続"] * w["health"]
-        + c["_目標到達"] * w["target_reach"] + c["_補完度"] * w["fit"]
-    ) / sum(w.values())
+    # ── 目標到達度（表示用。順位には使わず、絞り込みの条件として使う）──
+    tgt = c["target_yield"].fillna(0.047).replace(0, np.nan)
+    c["_目標到達"] = (c["dividend_yield"] / tgt * 100).clip(0, 200).fillna(0)
+
+    base = np.sqrt(c["_割安度"].clip(lower=0) * c["_継続"].clip(lower=0))
+    tiebreak = 0.9 + 0.2 * c["_補完度"] / 100
+    c["買い付け優先度"] = (base * tiebreak - c.get("trap_penalty", 0).fillna(0)).clip(lower=0)
     return c
+
+
+def buy_gate(c: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, pd.Series]:
+    """買ってはいけないものを外す。
+
+    順位を付ける前の足切り。安いからといって、配当が危ない銘柄や
+    高配当トラップの判定が出ている銘柄に資金を入れる理由はない。
+    """
+    g = config["buy_priority"]
+    reasons = pd.Series("", index=c.index)
+    trap = c.get("trap_penalty", pd.Series(0.0, index=c.index)).fillna(0)
+    bad_trap = trap >= float(g["max_trap_penalty"])
+    reasons[bad_trap] = "高配当トラップの判定が出ている"
+    low_health = c["health"].fillna(0) < float(g["min_health"])
+    reasons[low_health & (reasons == "")] = "配当継続スコアが低い"
+    return c[reasons == ""].copy(), reasons
 
 
 def month_gaps(positions: pd.DataFrame, calendar: pd.DataFrame | None) -> dict[int, float]:
@@ -120,6 +161,9 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
         return pd.DataFrame()
 
     c = buy_priority(c, positions, config, month_gap)
+    c, _ = buy_gate(c, config)
+    if c.empty:
+        return pd.DataFrame()
     # 発掘スコアではなく買い付け優先度の順に配る
     c = c.sort_values("買い付け優先度", ascending=False)
 
@@ -153,9 +197,12 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
             "年間配当": amount * (r.get("dividend_yield") or 0),
             "買い付け優先度": r["買い付け優先度"],
             "割安度": r["_割安度"],
+            "自己利回り順位": r["_自己利回り順位"],
+            "絶対利回り順位": r["_絶対利回り順位"],
             "継続": r["_継続"],
             "目標到達": r["_目標到達"],
             "補完度": r["_補完度"],
+            "トラップ減点": r.get("trap_penalty", 0),
             "発掘スコア": r.get("total"),
             "配当月": r.get("payout_months"),
             "業種の空き枠": max(cap_sector * total_after - used, 0.0),
