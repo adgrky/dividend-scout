@@ -13,6 +13,7 @@ info["payoutRatio"] は信用しない（実測: 4967 で 4.80 = 480%）。
 """
 from __future__ import annotations
 
+import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +25,40 @@ import yfinance as yf
 warnings.filterwarnings("ignore")
 
 ProgressFn = Callable[[float, str], None]
+
+
+class RateLimited(RuntimeError):
+    """yfinance の IP 単位のレート制限に当たった。
+
+    この状態になると財務が一律に空で返る。実測では、1時間前に取れていた 9432 でさえ
+    空になった。これを「財務が無い銘柄」として DB に記録すると、候補の半分が
+    理由も分からず画面から消える（実測: 1,217 銘柄中 521 銘柄がこの状態だった）。
+    握りつぶさず中断して、時間をおいてから --missing-only で取り直す。
+    中断までに取れたぶんは partial_fund / partial_snap に載せて渡す（捨てない）。
+    """
+
+    def __init__(self, message: str, partial_fund: pd.DataFrame | None = None,
+                 partial_snap: pd.DataFrame | None = None) -> None:
+        super().__init__(message)
+        self.partial_fund = partial_fund
+        self.partial_snap = partial_snap
+
+
+class _Throttle:
+    """全スレッド共通の間隔制限。並列度を上げても呼び出し間隔を保つ。"""
+
+    def __init__(self, min_interval: float) -> None:
+        self._lock = threading.Lock()
+        self._min = min_interval
+        self._last = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            gap = self._min - (now - self._last)
+            if gap > 0:
+                time.sleep(gap)
+            self._last = time.monotonic()
 
 FUNDAMENTAL_COLS = ["ticker", "fiscal_end", "net_income", "revenue", "operating_income",
                     "operating_cf", "free_cf", "total_equity", "total_assets",
@@ -62,13 +97,28 @@ def _pick(frames: list[pd.DataFrame], key: str, col) -> float | None:
     return None
 
 
-def fetch_one(ticker: str) -> tuple[pd.DataFrame, dict]:
-    """1銘柄の財務5期分＋最新スナップショットを取る。"""
-    tk = yf.Ticker(ticker)
-    try:
-        fin, bs, cf = tk.financials, tk.balance_sheet, tk.cashflow
-    except Exception:
-        fin = bs = cf = pd.DataFrame()
+def fetch_one(ticker: str, retries: int = 2,
+              throttle: "_Throttle | None" = None) -> tuple[pd.DataFrame, dict]:
+    """1銘柄の財務5期分＋最新スナップショットを取る。
+
+    yfinance は並列度を上げるとレート制限（HTTP 429 / Invalid Crumb）で
+    空の DataFrame を黙って返す。実測で 1,217 銘柄中 559 銘柄の財務が
+    取れておらず、候補の半分近くが理由も分からず消えていた。
+    空が返ったら待って取り直す。
+    """
+    fin = bs = cf = pd.DataFrame()
+    for attempt in range(retries + 1):
+        if throttle:
+            throttle.wait()
+        tk = yf.Ticker(ticker)
+        try:
+            fin, bs, cf = tk.financials, tk.balance_sheet, tk.cashflow
+        except Exception:
+            fin = bs = cf = pd.DataFrame()
+        if fin is not None and not fin.empty:
+            break
+        if attempt < retries:
+            time.sleep(2.0 * (attempt + 1))
     frames = [f for f in (fin, bs, cf) if f is not None and not f.empty]
 
     rows = []
@@ -99,29 +149,61 @@ def fetch_one(ticker: str) -> tuple[pd.DataFrame, dict]:
     return pd.DataFrame(rows).reindex(columns=FUNDAMENTAL_COLS), snap
 
 
-def fetch_many(tickers: Iterable[str], workers: int = 8,
-               progress: ProgressFn | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_many(tickers: Iterable[str], workers: int = 3,
+               progress: ProgressFn | None = None,
+               min_interval: float = 0.4,
+               empty_streak_limit: int = 25,
+               strict: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """財務をまとめて取る。
+
+    レート制限に当たると財務が一律に空で返るため、空が連続したら
+    RateLimited を投げて中断する（strict=False なら警告だけ出して続ける）。
+    途中まで取れたぶんは戻り値に含まれるので、呼び出し側で保存してよい。
+    """
     tickers = list(tickers)
     fund_parts, snaps, failed = [], [], []
     done = 0
+    empty_streak = 0
+    limited = False
+    throttle = _Throttle(min_interval)
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(fetch_one, t): t for t in tickers}
+        futures = {ex.submit(fetch_one, t, 2, throttle): t for t in tickers}
         for fut in as_completed(futures):
             t = futures[fut]
             done += 1
             try:
                 df, snap = fut.result()
-                if not df.empty:
+                if df.empty:
+                    empty_streak += 1
+                else:
+                    empty_streak = 0
                     fund_parts.append(df)
                 snaps.append(snap)
             except Exception:
                 failed.append(t)
+            if empty_streak >= empty_streak_limit and not limited:
+                limited = True
+                for f in futures:
+                    f.cancel()
+                break
             if progress and done % 20 == 0:
                 progress(done / len(tickers), f"財務取得 {done}/{len(tickers)}")
-    if progress:
-        progress(1.0, f"財務取得 完了（失敗 {len(failed)} 件）")
+
+    n_with_fin = len(fund_parts)
     fund = pd.concat(fund_parts, ignore_index=True) if fund_parts else pd.DataFrame(columns=FUNDAMENTAL_COLS)
-    return fund, pd.DataFrame(snaps).reindex(columns=SNAPSHOT_COLS)
+    snap_df = pd.DataFrame(snaps).reindex(columns=SNAPSHOT_COLS)
+
+    if limited:
+        msg = (f"yfinance のレート制限に当たった（財務が {empty_streak} 銘柄連続で空）。"
+               f"{done}/{len(tickers)} 銘柄まで処理、うち財務あり {n_with_fin}。"
+               f"30分ほど空けてから --missing-only で取り直すこと。")
+        if strict:
+            raise RateLimited(msg, fund, snap_df)
+        print(f"⚠️  {msg}")
+    elif progress:
+        progress(1.0, f"財務取得 完了（財務あり {n_with_fin} / 例外 {len(failed)} 件）")
+    return fund, snap_df
 
 
 def latest_metrics(fund: pd.DataFrame) -> pd.DataFrame:

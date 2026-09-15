@@ -21,6 +21,7 @@ from modules import fundamentals as fnd
 from modules import scoring, traps
 from modules.dividend_history import build_profiles, profiles_to_frame
 from modules.store import read_df, upsert_df
+from modules.quality import trim_frame
 from modules.valuation import build_valuation_table
 
 ProgressFn = Callable[[float, str], None]
@@ -40,7 +41,9 @@ def load_base() -> pd.DataFrame:
     uni = read_df("SELECT ticker, code, name, sector33, market FROM universe").set_index("ticker")
     quotes = read_df("SELECT * FROM quotes").set_index("ticker")
     div = read_df("SELECT ticker, date, amount FROM dividends")
-    prices = read_df("SELECT ticker, date, close FROM prices")
+    prices, trimmed = trim_frame(read_df("SELECT ticker, date, close FROM prices"))
+    if not trimmed.empty:
+        print(f"  価格データの破損区間を除外: {len(trimmed)} 銘柄")
 
     prof = profiles_to_frame(build_profiles(div))
     val = build_valuation_table(prices, div)
@@ -75,8 +78,22 @@ def prescreen(df: pd.DataFrame, config: dict) -> pd.Index:
     return df.index[ok.fillna(False)]
 
 
-def fetch_fundamentals(tickers, progress: ProgressFn | None = None) -> None:
-    fund, snap = fnd.fetch_many(tickers, workers=8, progress=progress)
+def fetch_fundamentals(tickers, progress: ProgressFn | None = None,
+                       strict: bool = True) -> None:
+    """財務を取って DB に入れる。
+
+    レート制限で中断された場合も、そこまでに取れたぶんは保存してから
+    例外を投げ直す。取り直しは --missing-only で差分だけ流せばいい。
+    """
+    try:
+        fund, snap = fnd.fetch_many(tickers, progress=progress, strict=strict)
+    except fnd.RateLimited as exc:
+        # 中断までに取れたぶんは保存してから投げ直す。捨てると次回また同じ銘柄を叩く。
+        if exc.partial_fund is not None and not exc.partial_fund.empty:
+            upsert_df("fundamentals", exc.partial_fund, fnd.FUNDAMENTAL_COLS)
+        if exc.partial_snap is not None and not exc.partial_snap.empty:
+            upsert_df("snapshots", exc.partial_snap, fnd.SNAPSHOT_COLS)
+        raise
     if not fund.empty:
         upsert_df("fundamentals", fund, fnd.FUNDAMENTAL_COLS)
     if not snap.empty:

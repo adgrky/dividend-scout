@@ -6,9 +6,9 @@ import streamlit as st
 
 from modules.allocator import allocate, rebalance_funds
 from modules.format import yen, yen_short
-from modules.portfolio import load_positions, review_candidates, sector_exposure
+from modules.portfolio import review_candidates, sector_exposure
 from modules.store import read_df
-from modules.ui import get_config, get_scores, no_data_guard
+from modules.ui import get_config, get_positions, get_scores, no_data_guard
 
 st.title("💰 資金投入")
 st.caption("入金額を、スコアと業種の空き枠に合わせて割り振る")
@@ -18,7 +18,7 @@ scores = get_scores()
 if no_data_guard(scores):
     st.stop()
 
-positions = load_positions(config)
+positions = get_positions(config)
 review = review_candidates(positions, config)
 
 c1, c2, c3, c4 = st.columns(4)
@@ -28,8 +28,8 @@ with c2:
     max_names = st.number_input("買う銘柄数の上限", 1, 20, 5,
                                 help="分散させすぎると監視が回らなくなる")
 with c3:
-    per_cap = st.slider("1銘柄あたりの上限", 0.1, 1.0, 0.3, 0.05,
-                        format="%.0f%%", help="今回の入金額に対する比率")
+    per_cap = st.slider("1銘柄あたりの上限（入金額に対する比率）", 10, 100, 30, 5,
+                        format="%d%%") / 100
 with c4:
     scope = st.radio("対象", ["未保有のみ", "保有の買い増しも含む"], index=1)
 

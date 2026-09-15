@@ -45,7 +45,7 @@ if not run and "validation_frames" not in st.session_state:
     st.stop()
 
 if run:
-    prices = read_df("SELECT ticker, date, close FROM prices ORDER BY ticker, date")
+    prices = read_df("SELECT ticker, date, close, volume FROM prices ORDER BY ticker, date")
     div = read_df("SELECT ticker, date, amount FROM dividends")
     if prices.empty:
         st.warning("株価データがありません。先に `uv run python scripts/weekly_scan.py` を実行してください。")

@@ -9,3 +9,4 @@ PyYAML>=6
 requests>=2.31
 python-dotenv>=1
 openpyxl>=3.1   # JPX data_j.xlsx を読むため
+scipy>=1.11         # 順位相関（検証で使う）

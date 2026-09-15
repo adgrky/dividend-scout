@@ -28,10 +28,11 @@ def build_alerts(config: dict) -> pd.DataFrame:
     sc = read_df(
         f"SELECT * FROM scores WHERE asof = (SELECT MAX(asof) FROM scores) "
         f"AND ticker IN ({placeholders})", tuple(targets)
-    ).set_index("ticker")
+    ).set_index("ticker").drop(columns=["asof"], errors="ignore")
     uni = read_df(f"SELECT ticker, name, sector33 FROM universe WHERE ticker IN ({placeholders})",
                   tuple(targets)).set_index("ticker")
-    q = read_df(f"SELECT * FROM quotes WHERE ticker IN ({placeholders})",
+    q = read_df(f"SELECT ticker, last_close, pos_52w, high_52w, low_52w, ret_1y "
+                f"FROM quotes WHERE ticker IN ({placeholders})",
                 tuple(targets)).set_index("ticker")
     div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({placeholders})",
                   tuple(targets))
@@ -64,8 +65,12 @@ def build_alerts(config: dict) -> pd.DataFrame:
                 f"{name}: 配当が前年比 {r['growth_latest']:.1%}（{r['dps_prev']:.1f} → {r['dps_latest']:.1f}円）")
 
         # 2) ゲートから落ちた＝買う理由が消えた
-        if r.get("gate_passed") == 0 and isinstance(r.get("gate_reason"), str) and r["gate_reason"]:
-            add(ticker, "high", "gate_failed", f"{name}: 採用基準を外れた（{r['gate_reason']}）")
+        # ただし「財務未取得」は単にまだ取りに行っていないだけで、異変ではない。
+        # これを重大アラートに混ぜると 142 件の 🔴 が並び、通知が読まれなくなる。
+        reason = r.get("gate_reason") if isinstance(r.get("gate_reason"), str) else ""
+        hard = [x for x in reason.split(" / ") if x and "財務未取得" not in x]
+        if r.get("gate_passed") == 0 and hard:
+            add(ticker, "high", "gate_failed", f"{name}: 採用基準を外れた（{' / '.join(hard)}）")
 
         # 3) トラップ検出
         penalty = r.get("trap_penalty") or 0
@@ -91,16 +96,21 @@ def build_alerts(config: dict) -> pd.DataFrame:
     return out.sort_values("_order").drop(columns="_order").reset_index(drop=True)
 
 
-def save_alerts(alerts: pd.DataFrame) -> int:
-    """同じ日に同じ内容を二重登録しない。"""
+def save_alerts(alerts: pd.DataFrame) -> pd.DataFrame:
+    """まだ記録していないアラートだけを登録し、その新規ぶんを返す。
+
+    「基準を外れている」「増配が止まっている」は毎日変わらない状態であって、
+    毎朝の出来事ではない。日付だけで重複を見ると、同じ 137 件が毎日届いて
+    通知が読まれなくなる。銘柄×種別で過去すべてと突き合わせ、
+    本当に新しいものだけを通知に回す。
+    """
     if alerts is None or alerts.empty:
-        return 0
-    today = datetime.now().strftime("%Y-%m-%d")
+        return pd.DataFrame()
     with connect() as conn:
         existing = {
             (r["ticker"], r["kind"])
             for r in conn.execute(
-                "SELECT ticker, kind FROM alerts WHERE detected_at LIKE ?", (f"{today}%",)
+                "SELECT ticker, kind FROM alerts WHERE resolved = 0"
             ).fetchall()
         }
         new = alerts[~alerts.apply(lambda r: (r["ticker"], r["kind"]) in existing, axis=1)]
@@ -110,7 +120,7 @@ def save_alerts(alerts: pd.DataFrame) -> int:
                 "VALUES (?, ?, ?, ?, ?, 0)",
                 (r["detected_at"], r["ticker"], r["severity"], r["kind"], r["message"]),
             )
-    return len(new)
+    return new
 
 
 def format_for_push(alerts: pd.DataFrame, limit: int = 10) -> str:

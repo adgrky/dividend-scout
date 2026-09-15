@@ -18,6 +18,8 @@ from typing import Callable, Iterable
 import pandas as pd
 import yfinance as yf
 
+from modules.quality import last_bad_jump, split_is_sane
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 ProgressFn = Callable[[float, str], None]
@@ -42,12 +44,16 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     df = df[~df.index.duplicated(keep="last")].sort_index()
 
-    # 末尾の Close が NaN の行を落とす
+    # 先頭と末尾の Close が NaN の行を落とす。
+    # 複数銘柄を一括ダウンロードすると全銘柄が共通の日付インデックスになり、
+    # まだ上場していなかった期間が NaN で埋められて返る。これを落とさないと
+    # 全銘柄の「上場日」がバッチ内の最古の日付になってしまい、上場年数の
+    # ゲートが機能しなくなる（実測: 3,707銘柄すべてが 2000-01-04 上場になった）。
     close = df["Close"]
-    last_valid = close.last_valid_index()
+    first_valid, last_valid = close.first_valid_index(), close.last_valid_index()
     if last_valid is None:
         return pd.DataFrame()
-    df = df.loc[:last_valid]
+    df = df.loc[first_valid:last_valid]
 
     # 大引け前の当日バーを落とす
     now = _now_jst()
@@ -156,6 +162,7 @@ def scan(tickers: Iterable[str], config: dict,
     period = config["universe"]["price_period"]
 
     weekly_parts, div_parts, split_parts, quotes = [], [], [], []
+    broken: list[dict] = []
     n_batches = (len(tickers) + batch_size - 1) // batch_size
 
     for i in range(n_batches):
@@ -170,6 +177,15 @@ def scan(tickers: Iterable[str], config: dict,
 
         for t, df in frames.items():
             w = _weekly(df)
+            # 古い株式分割が未調整のまま残っている銘柄がある（実測: 3,707銘柄中39銘柄。
+            # 8303.T は2023年に比率 5e-08 の分割が入り終値が553億円に跳ねていた）。
+            # 銘柄ごと捨てず、破損箇所より後だけ残す。
+            at = last_bad_jump(w["close"]) if not w.empty else None
+            if at is not None:
+                broken.append({"ticker": t, "破損日": at.strftime("%Y-%m-%d"),
+                               "残した行数": int((w.index > at).sum())})
+                w = w[w.index > at]
+                df = df[df.index > at]
             if not w.empty:
                 weekly_parts.append(pd.DataFrame({
                     "ticker": t,
@@ -178,13 +194,19 @@ def scan(tickers: Iterable[str], config: dict,
                     "volume": w["volume"].values,
                 }))
             div_parts.append(_events(t, df, "Dividends", "amount"))
-            split_parts.append(_events(t, df, "Stock Splits", "ratio"))
+            sp = _events(t, df, "Stock Splits", "ratio")
+            if not sp.empty:
+                sp = sp[sp["ratio"].map(split_is_sane)]
+            split_parts.append(sp)
             q = _quote(t, df)
             if q:
                 quotes.append(q)
 
     if progress:
-        progress(1.0, f"株価取得 完了（{len(quotes)} 銘柄）")
+        progress(1.0, f"株価取得 完了（{len(quotes)} 銘柄"
+                      + (f" / データ破損を一部除外 {len(broken)} 銘柄）" if broken else "）"))
+    for b in broken:
+        print(f"  {b['ticker']}: {b['破損日']} 以前を破損として除外（残り {b['残した行数']} 行）")
 
     def _concat(parts, cols):
         parts = [p for p in parts if p is not None and not p.empty]
@@ -195,4 +217,5 @@ def scan(tickers: Iterable[str], config: dict,
         "dividends": _concat(div_parts, ["ticker", "date", "amount"]),
         "splits": _concat(split_parts, ["ticker", "date", "ratio"]),
         "quotes": pd.DataFrame(quotes),
+        "broken": pd.DataFrame(broken),
     }

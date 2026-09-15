@@ -84,6 +84,12 @@ def apply_gate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     is_fin = df["sector33"].isin(fin_sectors)
 
+    # 財務を取りに行っていない銘柄を「基準未満」と書くと、落選理由が読めなくなる
+    # （実測で 3,079 銘柄が「財務が基準未満」と表示され、その大半は単に
+    #  粗いふるいの段階で対象外になっていただけだった）。データ欠如は別扱いにする。
+    no_fund = df["equity_ratio"].isna() & df["net_income"].isna()
+    fail(no_fund, "財務未取得（粗いふるいで対象外）")
+
     # 流動性・規模・上場年数
     fail(df["listing_years"] < g["min_listing_years"], f"上場{g['min_listing_years']}年未満")
     fail(df["market_cap_oku"] < g["min_market_cap_oku"], f"時価総額{g['min_market_cap_oku']}億未満")
@@ -94,9 +100,12 @@ def apply_gate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     fail(df["cuts_10y"] > g["max_dividend_cuts_10y"], f"10年で減配{g['max_dividend_cuts_10y']}回超")
     fail(df["dps_latest"] <= 0, "無配")
 
-    # 収益の安定
-    fail(df["positive_ocf_years"] < g["min_positive_ocf_years"], "営業CFプラスが不足")
-    fail(df["loss_years"] > g["max_loss_years_5y"], "赤字期が多い")
+    # 収益の安定（財務が無い銘柄には重ねて表示しない）
+    has_fund = ~no_fund
+    fail(has_fund & (df["n_periods"] < g["min_fiscal_periods"]), "決算データが少なく判定不能")
+    ocf_ratio = df["positive_ocf_years"] / df["n_periods"].replace(0, np.nan)
+    fail(has_fund & (ocf_ratio < g["min_positive_ocf_ratio"]), "営業CFがマイナスの期が多い")
+    fail(has_fund & (df["loss_years"] > g["max_loss_years_5y"]), "赤字期が多い")
 
     # 財務の健全性（設備産業を落とさないよう2本立て）
     equity_ok = df["equity_ratio"] >= g["min_equity_ratio"]
@@ -106,11 +115,15 @@ def apply_gate(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     )
     fin_ok = df["equity_ratio"] >= g["min_equity_ratio_financial"]
     bs_ok = np.where(is_fin, fin_ok.fillna(False), (equity_ok | leveraged_ok).fillna(False))
-    fail(~pd.Series(bs_ok, index=df.index), "財務が基準未満")
+    fail(has_fund & ~pd.Series(bs_ok, index=df.index), "財務が基準未満")
 
     # 配当の持続性
-    fail(df["payout_ratio"] > g["max_payout_ratio"], f"配当性向{g['max_payout_ratio']:.0%}超")
-    fail(df["fcf_payout_ratio"] > g["max_fcf_payout_ratio"], "FCFで配当を賄えていない")
+    fail(has_fund & (df["payout_ratio"] > g["max_payout_ratio"]),
+         f"配当性向{g['max_payout_ratio']:.0%}超")
+    fail(has_fund & (df["fcf_payout_ratio"] > g["max_fcf_payout_ratio"]),
+         "FCFで配当を賄えていない")
+    # 財務はあるのに配当性向が計算できない＝赤字などで判定不能
+    fail(has_fund & df["payout_ratio"].isna(), "配当性向が計算できない（赤字等）")
 
     out = df.copy()
     out["gate_reason"] = reasons.map(lambda xs: " / ".join(xs))

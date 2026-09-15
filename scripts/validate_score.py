@@ -38,10 +38,19 @@ def main() -> None:
                     help="起点にする年（12月末時点）をカンマ区切りで")
     ap.add_argument("--horizon", type=int, default=5, help="先の年数")
     ap.add_argument("--out", default=None, help="コホート結合結果の保存先 CSV")
+    ap.add_argument("--from-csv", default=None,
+                    help="--out で保存した CSV から読み直す（コホート構築をやり直さない）")
     args = ap.parse_args()
 
+    if args.from_csv:
+        allc = pd.read_csv(args.from_csv)
+        frames = {int(str(a)[:4]): g for a, g in allc.groupby("asof")}
+        print(f"読み込み: {args.from_csv} / {len(frames)} コホート / 延べ {len(allc):,} 銘柄")
+        _report(allc, frames, args)
+        return
+
     print("株価と配当履歴を読み込み中...")
-    prices = read_df("SELECT ticker, date, close FROM prices ORDER BY ticker, date")
+    prices = read_df("SELECT ticker, date, close, volume FROM prices ORDER BY ticker, date")
     div = read_df("SELECT ticker, date, amount FROM dividends")
     if prices.empty or div.empty:
         print("❌ データがない。先に scripts/weekly_scan.py を走らせること。")
@@ -68,7 +77,10 @@ def main() -> None:
     if args.out:
         allc.to_csv(args.out, index=False, encoding="utf-8-sig")
         print(f"\n保存: {args.out}")
+    _report(allc, frames, args)
 
+
+def _report(allc: pd.DataFrame, frames: dict, args) -> None:
     # ── 1. 指標ごとの説明力 ──
     _hr("1. 各指標と5年後の実績の順位相関（全コホート結合）")
     power = factor_power(allc)
@@ -105,14 +117,14 @@ def main() -> None:
         t = quintile_table(allc, col, "fwd_total_return")
         if t.empty:
             continue
-        line = "  ".join(f"{r['分位']}:{r['平均']:+.1%}" for _, r in t.iterrows())
+        line = "  ".join(f"{r['分位']}:{r['中央値']:+.0%}" for _, r in t.iterrows())
         print(f"{label:<28s} {line}")
-    print("\n（Q5 が最上位。Q1→Q5 で単調に上がっていれば本物の可能性がある）")
+    print("\n（Q5 が最上位。中央値で表示。Q1→Q5 で単調に上がっていれば本物の可能性がある）")
 
     # ── 4. ベンチマーク ──
     _hr("4. ベンチマーク（これに勝てないスコアは採用しない）")
     bench = benchmark(allc)
-    for col in ("トータルリターン", "DPS成長", "減配発生率"):
+    for col in ("リターン中央値", "リターン平均（裾を刈る）", "DPS成長 中央値", "減配発生率"):
         bench[col] = bench[col].map(lambda v: f"{v:+.1%}" if pd.notna(v) else "—")
     print(bench.to_string(index=False))
 

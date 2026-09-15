@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from modules.bulk_fetch import scan                                   # noqa: E402
 from modules.config import load_config                                # noqa: E402
+from modules.fundamentals import RateLimited                          # noqa: E402
 from modules.dividend_history import build_profiles, profiles_to_frame  # noqa: E402
 from modules.pipeline import fetch_fundamentals, load_base, prescreen, run_scoring  # noqa: E402
 from modules.store import connect, init_db, read_df, upsert_df        # noqa: E402
@@ -84,6 +85,8 @@ def main() -> None:
                     help="Stage 2-3（財務取得とスコア計算）を飛ばす")
     ap.add_argument("--skip-prices", action="store_true",
                     help="Stage 1（株価取得）を飛ばして DB のデータでスコアだけ作り直す")
+    ap.add_argument("--missing-only", action="store_true",
+                    help="Stage 2 で、財務がまだ取れていない銘柄だけ取り直す")
     args = ap.parse_args()
 
     config = load_config()
@@ -117,10 +120,19 @@ def main() -> None:
         target = prescreen(base, config)
         if args.limit or args.holdings_only:
             target = target.intersection(pd.Index(tickers))
+        if args.missing_only:
+            have = set(read_df("SELECT DISTINCT ticker FROM fundamentals").ticker)
+            target = pd.Index([t for t in target if t not in have])
+            _log(f"Stage 2: 財務が欠けている {len(target)} 銘柄だけ取り直す")
         _log(f"Stage 2: 粗いふるい通過 {len(target)} 銘柄の財務を取得中...")
         t0 = time.time()
-        fetch_fundamentals(list(target), progress=lambda p, m: _log(f"  {p:5.1%} {m}"))
-        _log(f"Stage 2: 完了 {time.time() - t0:.0f}秒")
+        try:
+            fetch_fundamentals(list(target), progress=lambda p, m: _log(f"  {p:5.1%} {m}"))
+            _log(f"Stage 2: 完了 {time.time() - t0:.0f}秒")
+        except RateLimited as exc:
+            _log(f"Stage 2: 中断 — {exc}")
+            _log("       そこまでに取れた財務でスコアを作り直す。"
+                 "時間をおいて --skip-prices --missing-only で差分を埋めること。")
 
         _log("Stage 3: ゲート判定・スコア計算中...")
         scored = run_scoring(config, progress=lambda p, m: _log(f"  {p:5.1%} {m}"))

@@ -32,6 +32,12 @@ def get_holdings() -> pd.DataFrame:
     return read_df("SELECT * FROM holdings")
 
 
+@st.cache_data(ttl=600, show_spinner="保有を集計中...")
+def get_positions(_config: dict) -> pd.DataFrame:
+    from modules.portfolio import load_positions
+    return load_positions(_config)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def get_watchlist() -> pd.DataFrame:
     return read_df("SELECT * FROM watchlist")

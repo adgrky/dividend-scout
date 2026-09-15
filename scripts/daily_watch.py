@@ -62,26 +62,34 @@ def main() -> None:
     run_scoring(config, progress=lambda p, m: _log(f"  {p:5.1%} {m}"))
 
     alerts = build_alerts(config)
-    body = format_for_push(alerts)
-    _log(f"検出 {len(alerts)} 件")
+    _log(f"検出 {len(alerts)} 件（状態として成立しているものすべて）")
+
+    if args.dry_run:
+        print("─" * 60)
+        print(format_for_push(alerts, limit=20))
+        print("─" * 60)
+        _log("--dry-run のため記録も通知もしない")
+        return
+
+    # 通知するのは「前回まで無かったもの」だけ。基準を外れているといった
+    # 状態は毎日変わらないので、毎朝全件送ると読まれなくなる。
+    new = save_alerts(alerts)
+    _log(f"{len(new)} 件が新規")
+    if new.empty:
+        _log("新しい異変はないので通知しない")
+        return
+
+    body = format_for_push(new, limit=12)
     print("─" * 60)
     print(body)
     print("─" * 60)
-
-    if args.dry_run:
-        _log("--dry-run のため通知は送らない")
-        return
-
-    n = save_alerts(alerts)
-    _log(f"{n} 件を新規記録")
-    if n > 0:
-        high = int((alerts["severity"] == "high").sum())
-        notifier.send(
-            title=f"配当ポートフォリオ 監視（重大 {high} 件）",
-            message=body,
-            priority="high" if high else "default",
-            tags="warning" if high else "chart_with_upwards_trend",
-        )
+    high = int((new["severity"] == "high").sum())
+    notifier.send(
+        title=f"配当ポートフォリオ 監視（新規 {len(new)} 件 / 重大 {high} 件）",
+        message=body,
+        priority="high" if high else "default",
+        tags="warning" if high else "chart_with_upwards_trend",
+    )
 
 
 if __name__ == "__main__":

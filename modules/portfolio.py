@@ -17,14 +17,18 @@ def load_positions(config: dict) -> pd.DataFrame:
     if h.empty:
         return h
     q = read_df("SELECT ticker, last_close, pos_52w FROM quotes").set_index("ticker")
-    u = read_df("SELECT ticker, name AS name_jpx, sector33, market FROM universe").set_index("ticker")
+    u = read_df("SELECT ticker, code, name AS name_jpx, sector33, market FROM universe").set_index("ticker")
     sc = read_df(
         "SELECT ticker, total, capacity, willingness, growth, neglect, valuation, "
         "trap_penalty, gate_passed, gate_reason FROM scores "
         "WHERE asof = (SELECT MAX(asof) FROM scores)"
     ).set_index("ticker")
 
-    div = read_df("SELECT ticker, date, amount FROM dividends")
+    # 保有銘柄ぶんだけ作る。全銘柄（3,707）ぶん作ると画面が20秒以上固まる。
+    tickers = sorted(set(h["ticker"]))
+    ph = ",".join("?" * len(tickers))
+    div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({ph})",
+                  tuple(tickers))
     from modules.dividend_history import build_profiles, profiles_to_frame
     prof = profiles_to_frame(build_profiles(div))
 
@@ -69,7 +73,10 @@ def dividend_calendar(pos: pd.DataFrame) -> pd.DataFrame:
     """月別の配当受取見込み。特定の月に偏っているかを見る。"""
     if pos.empty:
         return pd.DataFrame()
-    div = read_df("SELECT ticker, date, amount FROM dividends")
+    tickers = sorted(set(pos["ticker"]))
+    ph = ",".join("?" * len(tickers))
+    div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({ph})",
+                  tuple(tickers))
     if div.empty:
         return pd.DataFrame()
     div["date"] = pd.to_datetime(div["date"])
@@ -102,11 +109,17 @@ def review_candidates(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
     reasons = []
     for _, r in out.iterrows():
         rs = []
-        if r.get("gate_passed") == 0 and isinstance(r.get("gate_reason"), str) and r["gate_reason"]:
-            rs.append(f"基準を外れた（{r['gate_reason']}）")
+        reason = r.get("gate_reason") if isinstance(r.get("gate_reason"), str) else ""
+        # 財務をまだ取りに行っていないだけの銘柄を「基準を外れた」と書くと、
+        # 保有114銘柄のうち110銘柄が整理候補になり、シグナルとして役に立たない。
+        hard = [x for x in reason.split(" / ") if x and "財務未取得" not in x]
+        if r.get("gate_passed") == 0 and hard:
+            rs.append(f"基準を外れた（{' / '.join(hard)}）")
         if pd.notna(r.get("total")) and r["total"] < 40:
             rs.append(f"スコアが低い（{r['total']:.0f}）")
-        if (r.get("cuts_10y") or 0) >= 1:
+        # ゲートは10年で減配1回まで許容している。1回を整理候補に挙げると
+        # 採用基準と矛盾するので、ここも2回以上を対象にする。
+        if (r.get("cuts_10y") or 0) >= 2:
             rs.append(f"10年で減配{int(r['cuts_10y'])}回")
         if pd.notna(r.get("streak_no_cut")) and r["streak_no_cut"] == 0:
             rs.append("直近で減配")

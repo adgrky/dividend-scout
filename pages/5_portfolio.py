@@ -6,13 +6,13 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from modules.format import pct, yen, yen_short
-from modules.portfolio import dividend_calendar, load_positions, sector_exposure
-from modules.ui import get_config
+from modules.portfolio import dividend_calendar, sector_exposure
+from modules.ui import get_config, get_positions
 
 st.title("📊 ポートフォリオ")
 
 config = get_config()
-positions = load_positions(config)
+positions = get_positions(config)
 if positions.empty:
     st.warning("保有データがありません。\n\n```bash\nuv run python scripts/import_legacy.py\n```")
     st.stop()

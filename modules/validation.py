@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from modules.dividend_history import build_profile
+from modules.quality import trim_frame, winsorize
 
 # 検証できる指標だけを列挙する。名前は「どの層に属するか」を接頭辞で示す。
 TESTABLE_FACTORS = {
@@ -57,14 +58,17 @@ class Cohort:
     horizon_years: int = 5
 
 
-def _weekly_series(prices: pd.DataFrame) -> pd.Series:
-    return pd.Series(prices["close"].values, index=pd.to_datetime(prices["date"])).sort_index()
+def _weekly_series(prices: pd.DataFrame) -> pd.DataFrame:
+    df = prices.copy()
+    df.index = pd.to_datetime(df["date"])
+    return df[["close", "volume"]].sort_index()
 
 
-def build_asof_features(ticker: str, prices: pd.Series, div: pd.DataFrame,
+def build_asof_features(ticker: str, bars: pd.DataFrame, div: pd.DataFrame,
                         asof: pd.Timestamp, window_years: int = 7) -> dict | None:
     """asof 時点で判明していた情報だけで特徴量を作る（先読み厳禁）。"""
-    px = prices[prices.index <= asof]
+    bars = bars[bars.index <= asof]
+    px = bars["close"]
     dv = div[div["date"] <= asof]
     if len(px) < 52 * 3 or dv.empty:
         return None
@@ -89,7 +93,9 @@ def build_asof_features(ticker: str, prices: pd.Series, div: pd.DataFrame,
     cur_y = float(y.iloc[-1]) if len(y) else np.nan
     pctile = float((hist < cur_y).mean()) if len(hist) >= 52 and cur_y > 0 else np.nan
 
-    turnover = float(px.tail(20).mean())   # 週足終値の平均を規模の代用にする
+    # 売買代金＝終値 × 出来高。ここを終値だけで代用すると「低位株ほど良い」という
+    # 別の効果を測ってしまい、見過ごされ度の検証にならない。
+    turnover = float((bars["close"] * bars["volume"]).tail(20).mean())
 
     return {
         "ticker": ticker,
@@ -106,10 +112,11 @@ def build_asof_features(ticker: str, prices: pd.Series, div: pd.DataFrame,
     }
 
 
-def build_outcomes(ticker: str, prices: pd.Series, div: pd.DataFrame,
+def build_outcomes(ticker: str, bars: pd.DataFrame, div: pd.DataFrame,
                    asof: pd.Timestamp, feat: dict, horizon_years: int = 5) -> dict | None:
     """asof から horizon 年後の実績。"""
     end = asof + pd.DateOffset(years=horizon_years)
+    prices = bars["close"]
     px_fwd = prices[(prices.index > asof) & (prices.index <= end)]
     if px_fwd.empty or prices.index.max() < end - pd.Timedelta(days=45):
         return None  # 期間が満了していない銘柄は検証に入れない（上場廃止も含む）
@@ -137,6 +144,9 @@ def build_outcomes(ticker: str, prices: pd.Series, div: pd.DataFrame,
 def run_cohort(prices_all: pd.DataFrame, div_all: pd.DataFrame, cohort: Cohort,
                min_names: int = 100) -> pd.DataFrame:
     """1つの起点日について、特徴量と5年後の実績を突き合わせる。"""
+    # 破損区間を落としてから測る。順位相関は外れ値に強いが、分位別の平均や
+    # ベンチマークは1銘柄で壊れる（実測: 8303.T のせいで平均リターンが +480,000% になった）。
+    prices_all, _ = trim_frame(prices_all)
     div_all = div_all.copy()
     div_all["date"] = pd.to_datetime(div_all["date"])
     div_by = {t: g for t, g in div_all.groupby("ticker", sort=False)}
@@ -146,11 +156,11 @@ def run_cohort(prices_all: pd.DataFrame, div_all: pd.DataFrame, cohort: Cohort,
         dv = div_by.get(ticker)
         if dv is None or dv.empty:
             continue
-        px = _weekly_series(g)
-        feat = build_asof_features(ticker, px, dv, cohort.asof)
+        bars = _weekly_series(g)
+        feat = build_asof_features(ticker, bars, dv, cohort.asof)
         if feat is None:
             continue
-        out = build_outcomes(ticker, px, dv, cohort.asof, feat, cohort.horizon_years)
+        out = build_outcomes(ticker, bars, dv, cohort.asof, feat, cohort.horizon_years)
         if out is None:
             continue
         rows.append({**feat, **out, "asof": cohort.asof.strftime("%Y-%m-%d")})
@@ -192,28 +202,41 @@ def quintile_table(df: pd.DataFrame, factor_col: str, outcome_col: str,
                              labels=[f"Q{i + 1}" for i in range(q)])
     except ValueError:
         return pd.DataFrame()
-    g = sub.groupby("分位", observed=True)[outcome_col].agg(["mean", "median", "count"])
-    return g.rename(columns={"mean": "平均", "median": "中央値", "count": "銘柄数"}).reset_index()
+    # 平均は裾を刈ってから取る。リターンの分布は右に極端に長く、
+    # 上位1%の数銘柄で分位の平均が決まってしまう。
+    sub["_w"] = winsorize(sub[outcome_col])
+    g = sub.groupby("分位", observed=True).agg(
+        平均=("_w", "mean"), 中央値=(outcome_col, "median"), 銘柄数=(outcome_col, "count"))
+    return g.reset_index()
 
 
 def benchmark(df: pd.DataFrame, top_n: int = 30) -> pd.DataFrame:
-    """比較対象。これに勝てないスコアは採用しない。"""
-    rows = []
-    rows.append({"戦略": "全銘柄を等分で持つ", "銘柄数": len(df),
-                 "トータルリターン": df["fwd_total_return"].mean(),
-                 "DPS成長": df["fwd_dps_growth"].median(),
-                 "減配発生率": df["fwd_had_cut"].mean()})
-    hi = df.nlargest(top_n, "dividend_yield")
-    rows.append({"戦略": f"単純に利回り上位{top_n}銘柄", "銘柄数": len(hi),
-                 "トータルリターン": hi["fwd_total_return"].mean(),
-                 "DPS成長": hi["fwd_dps_growth"].median(),
-                 "減配発生率": hi["fwd_had_cut"].mean()})
-    st = df.nlargest(top_n, "streak")
-    rows.append({"戦略": f"連続増配年数 上位{top_n}銘柄", "銘柄数": len(st),
-                 "トータルリターン": st["fwd_total_return"].mean(),
-                 "DPS成長": st["fwd_dps_growth"].median(),
-                 "減配発生率": st["fwd_had_cut"].mean()})
-    return pd.DataFrame(rows)
+    """比較対象。これに勝てないスコアは採用しない。
+
+    リターンは中央値で比べる。平均は上位数銘柄で決まってしまい、
+    「実際に持ったらどうだったか」の感覚と合わない。
+    """
+    df = df.copy()
+    df["_w"] = winsorize(df["fwd_total_return"])
+
+    def row(label: str, sub: pd.DataFrame) -> dict:
+        return {"戦略": label, "銘柄数": len(sub),
+                "リターン中央値": sub["fwd_total_return"].median(),
+                "リターン平均（裾を刈る）": sub["_w"].mean(),
+                "DPS成長 中央値": sub["fwd_dps_growth"].median(),
+                "減配発生率": sub["fwd_had_cut"].mean()}
+
+    # コホートごとに上位N銘柄を取る。全コホートを混ぜて上位を取ると、
+    # たまたま一番良かった年のものばかり選ばれる。
+    def top_by(col: str) -> pd.DataFrame:
+        return pd.concat([g.nlargest(top_n, col) for _, g in df.groupby("asof")])
+
+    return pd.DataFrame([
+        row("全銘柄を等分で持つ", df),
+        row(f"単純に利回り上位{top_n}銘柄", top_by("dividend_yield")),
+        row(f"連続増配年数 上位{top_n}銘柄", top_by("streak")),
+        row(f"自己利回りパーセンタイル上位{top_n}銘柄", top_by("yield_percentile")),
+    ])
 
 
 def composite_test(train: pd.DataFrame, test: pd.DataFrame,
@@ -229,16 +252,16 @@ def composite_test(train: pd.DataFrame, test: pd.DataFrame,
         return pd.DataFrame([{"結果": "学習側で相関0.05を超える指標が無かった。合成しても意味がない。"}])
 
     cols = [TESTABLE_FACTORS[k] for k in keep]
-    z = test[cols].rank(pct=True)
-    score = z.mean(axis=1)
-    sel = test.assign(_score=score).nlargest(top_n, "_score")
+    scored = test.assign(_score=test[cols].rank(pct=True).mean(axis=1))
+    # コホートごとに上位を取る（混ぜて取ると当たり年に偏る）
+    sel = pd.concat([g.nlargest(top_n, "_score") for _, g in scored.groupby("asof")])
 
     return pd.DataFrame([{
         "採用した指標": "、".join(keep),
         "検証コホートの上位銘柄数": len(sel),
-        "トータルリターン（上位）": sel[outcome].mean(),
-        "トータルリターン（全体）": test[outcome].mean(),
-        "差": sel[outcome].mean() - test[outcome].mean(),
+        "上位の中央値": sel[outcome].median(),
+        "全体の中央値": test[outcome].median(),
+        "差": sel[outcome].median() - test[outcome].median(),
         "減配発生率（上位）": sel["fwd_had_cut"].mean(),
         "減配発生率（全体）": test["fwd_had_cut"].mean(),
     }])

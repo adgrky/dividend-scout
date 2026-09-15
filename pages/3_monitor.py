@@ -49,8 +49,9 @@ else:
                 fn(r["message"])
 
     if st.button("この検出結果を記録する"):
-        n = save_alerts(alerts)
-        st.success(f"{n} 件を記録しました")
+        new = save_alerts(alerts)
+        st.success(f"{len(new)} 件を新規に記録しました"
+                   if len(new) else "新しいアラートはありませんでした")
 
 st.divider()
 st.subheader("棄却条件を設定している銘柄")
