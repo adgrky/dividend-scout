@@ -5,6 +5,10 @@ Stage 1: yfinance 一括ダウンロードで株価（週足）・配当・分�
 Stage 2: 粗いふるいを通った銘柄だけ財務5期分を取る（個別取得なので必ず絞る）
 Stage 3: ゲート → トラップ検出 → スコア計算 → 日付つきスナップショットで保存
 
+有価証券報告書（EDINET）と、権利確定日・会社予想配当（yfinance）は別スクリプト:
+    uv run python scripts/fetch_edinet.py --index --fetch   # 年1回でよい（重い）
+    uv run python scripts/fetch_profiles.py --missing-only  # 月1回程度
+
 Streamlit に一切依存しないので、GitHub Actions からも同じコードで走る。
 
 使い方:
