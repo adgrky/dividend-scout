@@ -105,7 +105,11 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
 
     base = np.sqrt(c["_割安度"].clip(lower=0) * c["_継続"].clip(lower=0))
     tiebreak = 0.9 + 0.2 * c["_補完度"] / 100
-    c["買い付け優先度"] = (base * tiebreak - c.get("trap_penalty", 0).fillna(0)).clip(lower=0)
+    # trap_penalty 列が無い呼び出し元があるので、Series で受けてから引く
+    # （c.get(..., 0) は列が無いと int の 0 を返すため .fillna で落ちる）
+    penalty = c["trap_penalty"].fillna(0) if "trap_penalty" in c.columns \
+        else pd.Series(0.0, index=c.index)
+    c["買い付け優先度"] = (base * tiebreak - penalty).clip(lower=0)
     return c
 
 
@@ -117,7 +121,8 @@ def buy_gate(c: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, pd.Series]:
     """
     g = config["buy_priority"]
     reasons = pd.Series("", index=c.index)
-    trap = c.get("trap_penalty", pd.Series(0.0, index=c.index)).fillna(0)
+    trap = (c["trap_penalty"].fillna(0) if "trap_penalty" in c.columns
+            else pd.Series(0.0, index=c.index))
     bad_trap = trap >= float(g["max_trap_penalty"])
     reasons[bad_trap] = "高配当トラップの判定が出ている"
     low_health = c["health"].fillna(0) < float(g["min_health"])

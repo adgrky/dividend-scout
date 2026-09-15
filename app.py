@@ -17,6 +17,8 @@ from modules.config import bridge_secrets_to_env   # noqa: E402
 
 bridge_secrets_to_env()
 
+from modules.ui import freshness_banner                # noqa: E402
+
 pages = [
     st.Page("pages/1_discover.py", title="発掘", icon="🔭", default=True),
     st.Page("pages/2_profile.py", title="銘柄カルテ", icon="📄"),
@@ -26,4 +28,10 @@ pages = [
     st.Page("pages/6_validate.py", title="検証", icon="🧪"),
     st.Page("pages/7_guide.py", title="使い方", icon="📖"),
 ]
-st.navigation(pages).run()
+nav = st.navigation(pages)
+
+# データがいつ時点のものかは、どの画面にいても見えていなければならない。
+# 古い株価のまま利回りや指値を信じて売買を決めてしまうのを防ぐ。
+freshness_banner()
+
+nav.run()

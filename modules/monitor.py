@@ -3,6 +3,23 @@
 発掘の裏返し。買ったあとに仮説が壊れていないかを機械が見張る。
 アラートは「棄却条件に触れたか」を中心に組む。単に株価が下がったことは
 アラートにしない（配当株では株価下落はむしろ買い場になる）。
+
+【判定の出どころはひとつにする】
+以前ここは、売る判定を自前で持っていた。その結果、
+
+    日本製鉄        監視「目標利回りに到達＝買い場。良い知らせ」
+                    整理「🔴 利益を超えて配当を出している（配当性向 2193%）」
+    ヒラノテクシード  監視「買い場」／整理「🔴 直近の配当年度で減配した」
+    極東証券        監視「買い場」／整理「🔴 10年で5回も減配している」
+
+という **正反対の指示が同時に出ていた**（実測6銘柄）。
+さらに「採用基準を外れた」を high の警報にしていたため、160件中99件が
+「新規で買う条件を満たさないだけ」の雑音で埋まっていた。
+
+いまは
+    売る側の判定 … modules/sell_rules.evaluate（起きた事実だけに反応）
+    買う側の判定 … modules/allocator.buy_gate（配当継続とトラップで足切り）
+を **そのまま使う**。画面が違っても答えは必ず一致する。
 """
 from __future__ import annotations
 
@@ -49,6 +66,27 @@ def build_alerts(config: dict) -> pd.DataFrame:
     df["dividend_yield"] = np.where(df["last_close"] > 0,
                                     df["dps_latest"] / df["last_close"], np.nan)
 
+    # 売り側の判定を一度だけ作って共有する（画面ごとに別の答えを出さないため）
+    sell_verdict: dict = {}
+    try:
+        from modules import sell_rules
+        from modules.portfolio import load_positions
+        pos = load_positions(config)
+        if not pos.empty:
+            ev = sell_rules.evaluate(pos, config)
+            if not ev.empty:
+                # 同じ銘柄が2口座にあるときは重いほうを採用する
+                ev = ev.sort_values("重さ", key=lambda s: s.map(
+                    {k: i for i, k in enumerate(sell_rules.SEVERITY_ORDER)}))
+                sell_verdict = {r["ticker"]: r for _, r in
+                                ev.drop_duplicates("ticker").iterrows()}
+    except Exception as exc:                                  # データ不足でも監視は動かす
+        print(f"⚠️  売り判定を取り込めませんでした（続行）: {exc}")
+
+    bg = config.get("buy_priority", {})
+    min_health = float(bg.get("min_health", 40))
+    max_trap = float(bg.get("max_trap_penalty", 10))
+
     now = datetime.now().isoformat(timespec="seconds")
     rows = []
 
@@ -59,31 +97,72 @@ def build_alerts(config: dict) -> pd.DataFrame:
     for ticker, r in df.iterrows():
         name = r.get("name") or ticker
 
-        # 1) 減配 — 配当株にとって最も重い異変
-        if pd.notna(r.get("growth_latest")) and r["growth_latest"] < -0.001:
-            add(ticker, "high", "dividend_cut",
-                f"{name}: 配当が前年比 {r['growth_latest']:.1%}（{r['dps_prev']:.1f} → {r['dps_latest']:.1f}円）")
+        broken = sell_verdict.get(ticker)
 
-        # 2) ゲートから落ちた＝買う理由が消えた
-        # ただし「財務未取得」は単にまだ取りに行っていないだけで、異変ではない。
-        # これを重大アラートに混ぜると 142 件の 🔴 が並び、通知が読まれなくなる。
-        reason = r.get("gate_reason") if isinstance(r.get("gate_reason"), str) else ""
-        hard = [x for x in reason.split(" / ") if x and "財務未取得" not in x]
-        if r.get("gate_passed") == 0 and hard:
-            add(ticker, "high", "gate_failed", f"{name}: 採用基準を外れた（{' / '.join(hard)}）")
+        # 1) 減配 — 配当株にとって最も重い異変
+        # 売り判定の「直近の配当年度で減配した」と同じ出来事なので、1本にまとめる。
+        # 別々に出すと同じ銘柄で2つ警報が鳴り、件数だけが膨らむ。
+        cut_fired = False
+        if pd.notna(r.get("growth_latest")) and r["growth_latest"] < -0.001:
+            extra = ""
+            if broken is not None and "減配" in broken["理由"]:
+                extra = "　／　" + broken["根拠"].splitlines()[0].lstrip("・")
+            add(ticker, "high", "dividend_cut",
+                f"{name}: 配当が前年比 {r['growth_latest']:.1%}"
+                f"（{r['dps_prev']:.1f} → {r['dps_latest']:.1f}円）{extra}")
+            cut_fired = True
+
+        # 2) 配当が壊れた・原資が傷んだ
+        # 判定は売り側と同じ modules/sell_rules を使う。ここで自前の基準を持つと
+        # 「監視は買い場、整理は売れ」という矛盾が起きる（実測で6銘柄あった）。
+        # 「採用基準を外れた」はそれだけでは異変ではない。新規で買わない理由であって、
+        # 持っている株を手放す理由ではないから（実測で160件中99件がこれだった）。
+        lead = broken["理由"].splitlines()[0].lstrip("・") if broken is not None else ""
+        if cut_fired and lead.startswith("直近の配当年度で減配した"):
+            pass                       # 上の減配アラートと同じ出来事なので出さない
+        elif broken is not None and broken["重さ"] == "売却を検討":
+            add(ticker, "high", "dividend_broken",
+                f"{name}: {broken['理由'].splitlines()[0].lstrip('・')}"
+                f"（{broken['根拠'].splitlines()[0].lstrip('・')}）")
+        elif broken is not None and broken["重さ"] == "監視を強める":
+            add(ticker, "medium", "dividend_weak",
+                f"{name}: {broken['理由'].splitlines()[0].lstrip('・')}"
+                f"（{broken['根拠'].splitlines()[0].lstrip('・')}）")
+        elif broken is not None and broken["重さ"] == "利確を検討":
+            add(ticker, "low", "take_profit",
+                f"{name}: {broken['理由'].splitlines()[0].lstrip('・')}"
+                f"（{broken['根拠'].splitlines()[0].lstrip('・')}）")
 
         # 3) トラップ検出
         penalty = r.get("trap_penalty") or 0
         if penalty >= 12:
             add(ticker, "medium", "trap", f"{name}: 高配当トラップの兆候（減点 {penalty:.0f}）")
 
-        # 4) 指値到達 — 買い場。これは良い知らせのアラート
+        # 4) 指値到達
+        # **買い場と呼んでよいのは、買い側の足切りを通ったものだけ。**
+        # 利回りが目標に届いた理由が「減配を市場が織り込んだ株価下落」なら、
+        # それは買い場ではなく警告。買う画面と同じ基準（配当継続スコアと
+        # トラップ減点）で振り分ける。
         ty = r.get("target_yield")
-        if pd.notna(ty) and ty > 0 and pd.notna(r.get("dividend_yield")):
-            if r["dividend_yield"] >= ty:
-                price = r["last_close"]
-                add(ticker, "low", "target_reached",
-                    f"{name}: 目標利回り {ty:.2%} に到達（現在 {r['dividend_yield']:.2%} / ¥{price:,.0f}）")
+        if pd.notna(ty) and ty > 0 and pd.notna(r.get("dividend_yield")) \
+                and r["dividend_yield"] >= ty:
+            price = r["last_close"]
+            head = (f"{name}: 目標利回り {ty:.2%} に到達"
+                    f"（現在 {r['dividend_yield']:.2%} / ¥{price:,.0f}）")
+            health = r.get("health")
+            blocked = []
+            if pd.isna(health) or float(health) < min_health:
+                blocked.append(f"配当継続スコア {('—' if pd.isna(health) else f'{health:.0f}')}"
+                               f"（{min_health:.0f}未満）")
+            if penalty >= max_trap:
+                blocked.append(f"高配当トラップの減点 {penalty:.0f}")
+            if broken is not None and broken["重さ"] in ("売却を検討", "監視を強める"):
+                blocked.append(broken["理由"].splitlines()[0].lstrip("・"))
+            if blocked:
+                add(ticker, "medium", "yield_trap",
+                    head + " — ただし買ってはいけない：" + " / ".join(blocked))
+            else:
+                add(ticker, "low", "target_reached", head)
 
         # 5) 据え置きが続いている＝増配ストーリーが止まった
         if pd.notna(r.get("streak")) and r["streak"] == 0 and (r.get("streak_no_cut") or 0) >= 2:

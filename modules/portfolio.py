@@ -219,12 +219,35 @@ def expected_dividends(pos: pd.DataFrame, config: dict, months_back: int = 12,
     if div.empty:
         return pd.DataFrame()
 
-    # すでに記録した配当は出さない（同じ銘柄・同じ権利落ち月は1回きり）
-    done = read_df("SELECT ticker, account, date FROM transactions WHERE type='dividend'")
+    # すでに記録した配当は出さない。
+    #
+    # 鍵は **権利落ち日**。入金日で判定すると、「権利落ちから入金までの日数」を変えた
+    # とたんに同じ配当がもう一度未記録として出てきて、二重に計上できてしまう
+    # （実測: 75日→45日にしたら、記録済み224件が全部また未記録として出てきた）。
+    #
+    # ref_date を持たない古い記録は、入金日から「lag日前」を引くだけでは同じ問題が
+    # 残る（引く日数が設定で動くため）。**その銘柄の実際の権利落ち日のうち、入金日
+    # より前でいちばん近いもの**に吸着させる。設定を変えても答えが動かない。
+    done = read_df("SELECT ticker, account, date, ref_date FROM transactions "
+                   "WHERE type='dividend'")
     seen = set()
     if not done.empty:
-        d = pd.to_datetime(done["date"])
-        seen = set(zip(done["ticker"], done["account"], d.dt.to_period("M").astype(str)))
+        all_div = read_df("SELECT ticker, date FROM dividends")
+        all_div["date"] = pd.to_datetime(all_div["date"])
+        ex_by_ticker = {t: np.sort(g["date"].values)
+                        for t, g in all_div.groupby("ticker")}
+        for rec in done.itertuples(index=False):
+            ref = pd.to_datetime(rec.ref_date, errors="coerce")
+            if pd.isna(ref):
+                paid = pd.to_datetime(rec.date, errors="coerce")
+                dates = ex_by_ticker.get(rec.ticker)
+                if pd.isna(paid) or dates is None or len(dates) == 0:
+                    continue
+                prior = dates[dates <= paid.to_datetime64()]
+                if len(prior) == 0:
+                    continue
+                ref = pd.Timestamp(prior[-1])
+            seen.add((rec.ticker, rec.account, ref.to_period("M").__str__()))
 
     rate_s = float(config["portfolio"]["tax_rate_specific"])
     rows = []
@@ -234,7 +257,7 @@ def expected_dividends(pos: pd.DataFrame, config: dict, months_back: int = 12,
             pay = (r["date"] + pd.Timedelta(days=lag_days)).normalize()
             if pay > today:
                 continue
-            key = (h["ticker"], h["account"], pay.to_period("M").__str__())
+            key = (h["ticker"], h["account"], r["date"].to_period("M").__str__())
             if key in seen:
                 continue
             gross = float(h["shares"]) * float(r["amount"])

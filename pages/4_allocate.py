@@ -24,9 +24,10 @@ from modules.allocator import allocate, buy_gate, buy_priority, month_gaps, reba
 from modules.format import to_pct, yen, yen_short
 from modules.portfolio import dividend_calendar, sector_exposure
 from modules.store import connect, read_df
-from modules.ui import get_config, get_positions, get_scores, no_data_guard
+from modules.ui import flash, show_flash, get_config, get_positions, get_scores, no_data_guard
 
 st.title("💰 資金投入")
+show_flash()
 
 config = get_config()
 scores = get_scores()
@@ -398,8 +399,10 @@ with tab_buy:
                             " (SELECT bottom_yield FROM holdings WHERE account=? AND ticker=?),"
                             " datetime('now'))",
                             (account, ticker, r.銘柄名, ns, nc, account, ticker, account, ticker))
-                st.success(f"{len(rows)} 銘柄を記録しました。ポートフォリオに反映されています。")
+                flash(f"✅ {len(rows)} 銘柄・{yen((rows['株数'] * rows['約定単価']).sum())} "
+                      "を買ったこととして記録しました。ポートフォリオに反映されています。")
                 st.cache_data.clear()
+                st.rerun()
 
 # ═══════════════════════════════════════════════ 整理する
 with tab_sell:
@@ -548,15 +551,15 @@ with tab_sell:
                 st.warning("判断が選ばれていません")
             elif act in ("持ち続ける", "様子見"):
                 R.save(r["account"], r["ticker"], "keep" if act == "持ち続ける" else "watch")
-                st.success(f"{r['name']} を「{act}」として記録しました。次から隠れます。")
+                flash(f"✅ {r['name']} を「{act}」として記録しました。次から隠れます。")
                 st.cache_data.clear()
                 st.rerun()
             elif sh <= 0:
                 st.warning("売った株数を入れてください")
             else:
                 _record_sell(r["account"], r["ticker"], r["name"], sh, pr, sd)
-                st.success(f"{r['name']} を {sh:,.0f} 株 {yen(sh * pr)} で売却として記録しました。"
-                           "ポートフォリオに反映されています。")
+                flash(f"✅ {r['name']} を {sh:,.0f} 株 {yen(sh * pr)} で売却として記録しました。"
+                      "ポートフォリオの株数に反映されています。")
                 st.cache_data.clear()
                 st.rerun()
 
@@ -604,7 +607,7 @@ with tab_sell:
             if undo and st.button("この判断を取り消す"):
                 acc, rest = undo.split("／")
                 R.clear(acc, rest.split(" ")[0])
-                st.success("取り消しました")
+                flash("✅ 判断を取り消しました。また整理の一覧に出てきます。")
                 st.cache_data.clear()
                 st.rerun()
 

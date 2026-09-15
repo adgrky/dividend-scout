@@ -22,6 +22,8 @@ yfinance は普通配当と記念配当を区別しない。区別せずに扱�
 """
 from __future__ import annotations
 
+from datetime import date
+
 import math
 from dataclasses import dataclass, field, asdict
 
@@ -230,12 +232,24 @@ def next_ex_dates(tickers: list[str] | None = None, lookback_years: int = 3,
     yfinance の ex_dividend_date は実測で **1,272社のうち5社しか入っていない**
     （保有86銘柄では0件）。そのままでは使えない。
 
-    日本株の権利落ち日は決算期末に固定されていて、実質「その月の最終営業日」。
-    3月期末の会社なら毎年3月末と9月末に落ちる。だから過去の権利落ち月が
-    分かれば、次がいつかはかなり正確に置ける。
+    【どう置くか】
+    日本株の権利落ち日は決算期末に固定されていて、実測では 2021〜2026年の
+    25,085件のうち **23,643件（94.2%）が「その月の最終営業日の1営業日前」**。
+    年をまたいでも比率は変わらない。
+
+    そこで、その銘柄自身の過去の権利落ち日が「月の最終営業日の何営業日前か」を
+    測り、同じ位置に置く。月末に張り付いていない銘柄（月の途中で落ちるもの）は
+    同じ日付を使い、休業日なら手前の営業日にずらす。
+
+    **月末を土日だけで計算してはいけない。** 祝日をまたぐ月でずれ、しかも
+    ずれる方向が「実際より後ろ」になる。「その日までに買えば間に合う」と出した
+    日にはもう権利が落ちていて、配当を1回取り逃がす。東証の休業日は
+    modules/jp_calendar.py で持つ。
 
     **予測であって会社の発表ではない**ので、画面では必ずそう書くこと。
     """
+    from modules.jp_calendar import (last_trading_day, prev_trading_day,
+                                     shift_trading_days, trading_days_before_month_end)
     from modules.store import read_df
     if tickers:
         ph = ",".join("?" * len(tickers))
@@ -243,14 +257,15 @@ def next_ex_dates(tickers: list[str] | None = None, lookback_years: int = 3,
                       tuple(tickers))
     else:
         div = read_df("SELECT ticker, date, amount FROM dividends")
+    cols = ["ticker", "次の権利落ち日", "あと何日", "1株配当の目安", "根拠"]
     if div.empty:
-        return pd.DataFrame(columns=["ticker", "次の権利落ち日", "あと何日", "1株配当の目安", "根拠"])
+        return pd.DataFrame(columns=cols)
 
     div["date"] = pd.to_datetime(div["date"])
     today = pd.Timestamp.today().normalize()
     recent = div[div["date"] >= today - pd.DateOffset(years=lookback_years)]
     if recent.empty:
-        return pd.DataFrame(columns=["ticker", "次の権利落ち日", "あと何日", "1株配当の目安", "根拠"])
+        return pd.DataFrame(columns=cols)
 
     rows = []
     for ticker, g in recent.groupby("ticker"):
@@ -258,28 +273,30 @@ def next_ex_dates(tickers: list[str] | None = None, lookback_years: int = 3,
         best = None
         for month, mg in g.groupby(g["date"].dt.month):
             last = mg.iloc[-1]
-            hist_day = int(last["date"].day)
-            # 月末に張り付いているか（その月の最終営業日かどうか）を見る
-            month_end = last["date"] + pd.offsets.MonthEnd(0)
-            at_month_end = (month_end - last["date"]).days <= 3
+            hist = last["date"].date()
+            # 月末からの位置（営業日単位）。0〜3営業日前なら「月末張り付き」とみなす
+            offset = trading_days_before_month_end(hist)
+            at_month_end = offset <= 3
+            note = (f"前年の{int(month)}月は月末の{offset}営業日前"
+                    if at_month_end else f"前年の{int(month)}月{hist.day}日")
 
             for add_year in (0, 1):
                 year = today.year + add_year
                 try:
                     if at_month_end:
-                        cand = pd.Timestamp(year=year, month=int(month), day=1) \
-                            + pd.offsets.MonthEnd(0)
-                        # 最終営業日にずらす（土日なら手前の金曜）
-                        while cand.weekday() >= 5:
-                            cand -= pd.Timedelta(days=1)
+                        cand = shift_trading_days(
+                            last_trading_day(year, int(month)), -offset) if offset                             else last_trading_day(year, int(month))
                     else:
-                        cand = pd.Timestamp(year=year, month=int(month), day=hist_day)
+                        cand = date(year, int(month), hist.day)
+                        while not _is_td(cand):
+                            cand = prev_trading_day(cand)
                 except ValueError:
                     continue
-                if cand <= today or (cand - today).days > horizon_days:
+                ts = pd.Timestamp(cand)
+                if ts <= today or (ts - today).days > horizon_days:
                     continue
-                if best is None or cand < best[0]:
-                    best = (cand, float(last["amount"]), int(month))
+                if best is None or ts < best[0]:
+                    best = (ts, float(last["amount"]), note)
                 break
         if best:
             rows.append({
@@ -287,8 +304,13 @@ def next_ex_dates(tickers: list[str] | None = None, lookback_years: int = 3,
                 "次の権利落ち日": best[0].date(),
                 "あと何日": int((best[0] - today).days),
                 "1株配当の目安": best[1],
-                "根拠": f"前年の{best[2]}月の権利落ち日から",
+                "根拠": best[2],
             })
-    return pd.DataFrame(rows).sort_values("次の権利落ち日").reset_index(drop=True) \
-        if rows else pd.DataFrame(columns=["ticker", "次の権利落ち日", "あと何日",
-                                           "1株配当の目安", "根拠"])
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows).sort_values("次の権利落ち日").reset_index(drop=True)
+
+
+def _is_td(d) -> bool:
+    from modules.jp_calendar import is_trading_day
+    return is_trading_day(d)

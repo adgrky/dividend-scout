@@ -12,9 +12,10 @@ import streamlit as st
 from modules.format import to_pct
 from modules.monitor import build_alerts, save_alerts
 from modules.store import read_df
-from modules.ui import get_config, get_scores, no_data_guard
+from modules.ui import flash, show_flash, get_config, get_scores, no_data_guard
 
 st.title("🚨 監視")
+show_flash()
 st.caption("保有とウォッチリストの異変。株価の下落そのものはアラートにしない（配当株では買い場になるため）")
 
 config = get_config()
@@ -41,36 +42,67 @@ alerts = alerts.join(names, on="ticker")
 by_kind = {k: g for k, g in alerts.groupby("kind")}
 n = {k: len(g) for k, g in by_kind.items()}
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("🔴 減配した", n.get("dividend_cut", 0), help="配当株にとって最も重い異変")
-c2.metric("🔵 指値に届いた", n.get("target_reached", 0), help="買い場。良い知らせ")
-c3.metric("⚠️ 基準を外れた", n.get("gate_failed", 0), help="買う理由が消えた状態")
-c4.metric("➖ 増配が止まった", n.get("dividend_flat", 0), help="据え置きが続いている")
+KINDS = {
+    "dividend_cut":     ("🔴", "減配した", "配当株にとって最も重い異変。増配を前提に買ったなら前提が消えた"),
+    "dividend_broken":  ("🔴", "配当が壊れた", "利益を超えて配当している／減配を繰り返している"),
+    "yield_trap":       ("🟠", "安いが買えない", "利回りは目標に届いたが、配当が危ない銘柄"),
+    "dividend_weak":    ("🟡", "原資が傷んでいる", "まだ配当は出ているが、次の決算で確かめるもの"),
+    "trap":             ("🟡", "高配当トラップ", "利回りの高さが減配の織り込みかもしれない"),
+    "target_reached":   ("🔵", "買い場", "目標利回りに届き、かつ買う基準も通っている"),
+    "take_profit":      ("🟢", "利確の検討", "壊れたのではなく育ちきった。ヘムの「上がりすぎたら売る」"),
+    "dividend_flat":    ("⚪️", "増配が止まった", "据え置きが続いている"),
+}
+
+cols = st.columns(4)
+for i, (kind, (icon, label, help_)) in enumerate(KINDS.items()):
+    cols[i % 4].metric(f"{icon} {label}", n.get(kind, 0), help=help_)
+
+st.info("""**判定の出どころはひとつです。**
+
+以前このページは売る判定を自前で持っていて、同じ銘柄に正反対の指示が出ていました。
+
+    日本製鉄　　　監視「目標利回りに到達＝買い場。良い知らせ」
+    　　　　　　　整理「🔴 利益を超えて配当を出している（配当性向 2193%）」
+
+いまは 🧹 整理する と同じ `sell_rules`、🛒 買う と同じ足切りを使っています。
+**「買い場」と出るのは、目標利回りに届き、かつ買う基準も通ったものだけ**です。""")
 
 st.divider()
 
-# ── いま手を動かすべきもの ──
+# ── いま判断が要るもの ──
 st.subheader("いま判断が要るもの")
 
-cut = by_kind.get("dividend_cut")
-if cut is not None and not cut.empty:
-    st.markdown("**減配した銘柄** — 保有し続ける理由があるか確認する")
-    for _, r in cut.iterrows():
+for kind in ("dividend_cut", "dividend_broken"):
+    g = by_kind.get(kind)
+    if g is None or g.empty:
+        continue
+    icon, label, help_ = KINDS[kind]
+    st.markdown(f"**{icon} {label}** — {help_}")
+    for _, r in g.iterrows():
         st.error(r["message"])
-else:
-    st.caption("減配した銘柄はありません")
+
+trap_like = pd.concat([by_kind[k] for k in ("yield_trap", "trap", "dividend_weak")
+                       if k in by_kind], ignore_index=True) \
+    if any(k in by_kind for k in ("yield_trap", "trap", "dividend_weak")) else pd.DataFrame()
+if not trap_like.empty:
+    st.markdown("**🟠 安いが買えない／原資が傷んでいる** — "
+                "利回りだけを見て買い増すと損をするもの")
+    for _, r in trap_like.iterrows():
+        st.warning(r["message"])
 
 reached = by_kind.get("target_reached")
 if reached is not None and not reached.empty:
-    st.markdown("**目標利回りに届いた銘柄** — 買い増しの候補")
+    st.markdown("**🔵 買い場** — 目標利回りに届き、かつ買う基準も通っている")
     for _, r in reached.iterrows():
         st.info(r["message"])
+else:
+    st.caption("いま「買い場」と呼べる銘柄はありません。")
 
-trap = by_kind.get("trap")
-if trap is not None and not trap.empty:
-    st.markdown("**高配当トラップの兆候**")
-    for _, r in trap.iterrows():
-        st.warning(r["message"])
+tp = by_kind.get("take_profit")
+if tp is not None and not tp.empty:
+    with st.expander(f"🟢 利確の検討（{len(tp)} 件）— 壊れたのではなく育ちきった銘柄"):
+        for _, r in tp.iterrows():
+            st.success(r["message"])
 
 st.divider()
 
@@ -78,23 +110,15 @@ st.divider()
 st.subheader("状態として続いているもの")
 st.caption("毎日変わるものではないので一覧にまとめている。整理の判断材料として見る。")
 
-standing = pd.concat([g for k, g in by_kind.items()
-                      if k in ("gate_failed", "dividend_flat")], ignore_index=True) \
-    if any(k in by_kind for k in ("gate_failed", "dividend_flat")) else pd.DataFrame()
-
+standing = by_kind.get("dividend_flat", pd.DataFrame())
 if standing.empty:
     st.caption("該当なし")
 else:
-    kind_label = {"gate_failed": "基準を外れた", "dividend_flat": "増配が止まった"}
     tbl = pd.DataFrame({
         "コード": standing["code"],
         "銘柄名": standing["name"],
-        "種別": standing["kind"].map(kind_label).fillna(standing["kind"]),
         "内容": standing["message"].str.split(": ").str[-1],
     })
-    pick = st.multiselect("種別で絞る", sorted(tbl["種別"].unique()), default=[])
-    if pick:
-        tbl = tbl[tbl["種別"].isin(pick)]
     st.dataframe(tbl, hide_index=True, width="stretch", height=380,
                  column_config={"内容": st.column_config.TextColumn(width="large")})
 

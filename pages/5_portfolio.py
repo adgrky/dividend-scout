@@ -11,9 +11,10 @@ from modules.format import pct, to_pct, yen, yen_short
 from modules.portfolio import (dividend_calendar, dividends_received,
                                expected_dividends, record_equity, sector_exposure)
 from modules.store import connect, read_df
-from modules.ui import get_config, get_next_ex_dates, get_positions
+from modules.ui import flash, show_flash, get_config, get_next_ex_dates, get_positions
 
 st.title("📊 ポートフォリオ")
+show_flash()
 
 config = get_config()
 positions = get_positions(config)
@@ -107,7 +108,7 @@ with tab1:
                             (sh, cost, tgt, orig.account, orig.ticker))
                         n_upd += 1
             if n_upd or n_del:
-                st.success(f"{n_upd} 銘柄を直し、{n_del} 銘柄を消しました")
+                flash(f"✅ {n_upd} 銘柄を直し、{n_del} 銘柄を保有から外しました")
                 st.cache_data.clear()
                 st.rerun()
             else:
@@ -200,6 +201,7 @@ with tab6:
                "日本株の権利落ち日は決算期末に固定されていて、実質その月の最終営業日です。")
 
     ex = get_next_ex_dates(tuple(sorted(set(positions["ticker"]))))
+    m = pd.DataFrame()
     if ex.empty:
         st.info("配当履歴が足りず、予測できませんでした。")
     else:
@@ -210,6 +212,9 @@ with tab6:
         m = ex.merge(pos_sum, on="ticker", how="inner")
         m["受取見込み"] = (m["shares"] * m["1株配当の目安"]).round(0)
 
+    if not ex.empty and m.empty:
+        st.info("保有銘柄と予測を突き合わせられませんでした。")
+    elif not ex.empty:
         soon = m[m["あと何日"] <= 30]
         c1, c2, c3 = st.columns(3)
         c1.metric("30日以内に権利落ち", f"{len(soon)} 銘柄")
@@ -322,11 +327,15 @@ with tab4:
                     src = exp.loc[i]
                     conn.execute(
                         "INSERT INTO transactions (date, account, ticker, name, type, "
-                        "shares, price, fee, memo) VALUES (?, ?, ?, ?, 'dividend', 1, ?, 0, ?)",
+                        "shares, price, fee, memo, ref_date) "
+                        "VALUES (?, ?, ?, ?, 'dividend', 1, ?, 0, ?, ?)",
                         (str(r["受取日"]), src["_account"], src["_ticker"], src["銘柄名"],
                          float(r["受取額（税引後）"]),
-                         f"自動生成（権利落ち {src['権利落ち日']}／{r['株数']:.0f}株）"))
-            st.success(f"{len(picked)} 件・{yen(picked['受取額（税引後）'].sum())} を記録しました")
+                         f"自動生成（権利落ち {src['権利落ち日']}／{r['株数']:.0f}株）",
+                         str(src["権利落ち日"])))
+            flash(f"✅ 配当の受取 {len(picked)} 件・"
+                  f"{yen(picked['受取額（税引後）'].sum())}（税引後）を記録しました。"
+                  "間違えたときは下の「まとめて取り消す」で戻せます。")
             st.cache_data.clear()
             st.rerun()
 
@@ -358,9 +367,61 @@ with tab4:
                         "price, fee, memo) VALUES (?, ?, ?, ?, 'dividend', 1, ?, 0, ?)",
                         (recv_date.isoformat(), row.account, row.ticker, row.name,
                          float(amount), "手入力（税引後）"))
-                st.success(f"{row.name} の配当 {yen(amount)} を記録しました")
+                flash(f"✅ {row.name} の配当 {yen(amount)} を記録しました")
                 st.cache_data.clear()
                 st.rerun()
+
+    with st.expander("記録した配当を取り消す"):
+        st.caption("まとめて記録したあとで間違いに気づいたときに使います。"
+                   "**消した配当は、また「自動で作る」の一覧に戻ってきます。**")
+        tx = read_df("SELECT id, date, account, ticker, name, shares, price, memo "
+                     "FROM transactions WHERE type='dividend' ORDER BY date DESC, id DESC")
+        if tx.empty:
+            st.caption("取り消せる記録はありません")
+        else:
+            tx["受取額"] = tx["shares"] * tx["price"]
+            tx["区分"] = tx["memo"].fillna("").map(
+                lambda m: "自動生成" if str(m).startswith("自動生成") else "手入力")
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                scope = st.radio("取り消す範囲", ["選んだ日にまとめて記録したぶん",
+                                             "自動生成したものすべて", "1件だけ"])
+            targets = pd.DataFrame()
+            if scope == "選んだ日にまとめて記録したぶん":
+                with c2:
+                    days = sorted(tx["date"].unique(), reverse=True)
+                    pick_day = st.selectbox(
+                        "記録した受取日", days,
+                        format_func=lambda d: f"{d}（{int((tx['date'] == d).sum())} 件・"
+                                              f"{(tx.loc[tx['date'] == d, '受取額'].sum()):,.0f} 円）")
+                    targets = tx[tx["date"] == pick_day]
+            elif scope == "自動生成したものすべて":
+                targets = tx[tx["区分"] == "自動生成"]
+                with c2:
+                    st.caption(f"対象は **{len(targets)} 件・"
+                               f"{targets['受取額'].sum():,.0f} 円**（手入力したものは残ります）")
+            else:
+                with c2:
+                    labels = {f"{r.date} {r.name}（{r.受取額:,.0f}円）": r.id
+                              for r in tx.head(300).itertuples(index=False)}
+                    pick_one = st.selectbox("取り消す記録", [""] + list(labels))
+                    if pick_one:
+                        targets = tx[tx["id"] == labels[pick_one]]
+
+            if not targets.empty:
+                st.warning(f"**{len(targets)} 件・{yen(targets['受取額'].sum())}** を取り消します。"
+                           "元に戻せません。")
+                if st.checkbox("この内容で取り消すことを確認した", key="undo_div_confirm"):
+                    if st.button("取り消す", type="primary"):
+                        ids = [int(i) for i in targets["id"]]
+                        with connect() as conn:
+                            conn.executemany("DELETE FROM transactions WHERE id = ?",
+                                             [(i,) for i in ids])
+                        flash(f"🗑 配当の受取記録 {len(ids)} 件・"
+                              f"{yen(targets['受取額'].sum())} を取り消しました。"
+                              "「自動で作る」の一覧に戻っています。", "info")
+                        st.cache_data.clear()
+                        st.rerun()
 
     if not got.empty:
         st.markdown("#### 記録の一覧")

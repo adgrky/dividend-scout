@@ -20,11 +20,12 @@ import streamlit as st
 from modules import explain as E, peers as P
 from modules.format import pct, to_pct, yen, yen_short
 from modules.store import read_df
-from modules.ui import (LAYER_LABELS, get_config, get_dividend_profile,
+from modules.ui import (flash, show_flash, LAYER_LABELS, get_config, get_dividend_profile,
                         get_next_ex_dates, get_prices, get_scores, no_data_guard)
 from modules.valuation import price_for_target_yield, yield_percentile, yield_series
 
 st.title("📄 銘柄カルテ")
+show_flash()
 
 config = get_config()
 scores = get_scores()

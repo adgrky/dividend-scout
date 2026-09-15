@@ -16,11 +16,12 @@ import streamlit as st
 
 from modules.format import csv_bytes, to_pct
 from modules.store import read_df
-from modules.ui import (LAYER_LABELS, get_config, get_holdings, get_next_ex_dates,
+from modules.ui import (flash, show_flash, LAYER_LABELS, get_config, get_holdings, get_next_ex_dates,
                         get_scores,
                         get_watchlist, no_data_guard)
 
 st.title("🔭 発掘")
+show_flash()
 st.caption("市場に正しく評価されていない増配期待企業を全上場から探す")
 
 config = get_config()
@@ -93,7 +94,7 @@ if month != "—":
 # 資金投入と同じ式で買い付け優先度を出す。画面ごとに違う指標を見せない。
 from modules.allocator import buy_priority, month_gaps          # noqa: E402
 from modules.portfolio import dividend_calendar                 # noqa: E402
-from modules.ui import get_positions                            # noqa: E402
+from modules.ui import flash, show_flash, get_positions                            # noqa: E402
 
 _pos = get_positions(config)
 # 目標利回り（保有・ウォッチに設定したもの）を貼っておく

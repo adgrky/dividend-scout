@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     shares  REAL,
     price   REAL,
     fee     REAL,
-    memo    TEXT
+    memo    TEXT,
+    ref_date TEXT                    -- 配当なら権利落ち日。二重計上を防ぐ鍵
 );
 
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -285,6 +286,11 @@ _MIGRATIONS = [
     ("company_profile", "dividend_policy", "TEXT"),
     ("company_profile", "policy_flags", "TEXT"),
     ("company_profile", "policy_score", "REAL"),
+    # 配当の受取記録の二重計上を防ぐ。入金日は「権利落ちから何日後か」の設定で動くので、
+    # 入金日で重複を判定すると設定を変えるたびに同じ配当をもう一度記録できてしまう
+    # （実測: 入金までの日数を75日→45日にすると、記録済みの222件が再び未記録として出た）。
+    # 権利落ち日は動かないので、こちらを鍵にする。
+    ("transactions", "ref_date", "TEXT"),
 ]
 
 
