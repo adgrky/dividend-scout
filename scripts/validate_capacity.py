@@ -36,6 +36,7 @@ import numpy as np                                    # noqa: E402
 import pandas as pd                                   # noqa: E402
 from scipy.stats import spearmanr                     # noqa: E402
 
+from modules.dividend_history import build_profile    # noqa: E402
 from modules.store import read_df                     # noqa: E402
 from modules.quality import trim_frame                # noqa: E402
 
@@ -95,14 +96,19 @@ def build_cohort(fy: int, horizon: int, prices: pd.DataFrame,
             continue
         d1 = float(dv[(dv.index > end - pd.DateOffset(years=1)) & (dv.index <= end)].sum())
         received = float(dv[(dv.index > asof) & (dv.index <= end)].sum())
-        had_cut = False
-        for k in range(horizon):
-            a = float(dv[(dv.index > asof + pd.DateOffset(years=k))
-                         & (dv.index <= asof + pd.DateOffset(years=k + 1))].sum())
-            b = float(dv[(dv.index > asof + pd.DateOffset(years=k + 1))
-                         & (dv.index <= asof + pd.DateOffset(years=k + 2))].sum())
-            if a > 0 and b > 0 and b < a * 0.999:
-                had_cut = True
+
+        # 減配の判定は本検証（modules/validation.py）と同じやり方に揃える。
+        # 自前で年度を切ると
+        #   ・起点の年から1年目への減配を見落とす
+        #   ・期間の外（horizon+1年目）まで見てしまう
+        # という取りこぼしと先読みが起きる。build_profile は記念配当の
+        # スパイクを除いた年度系列を返すので、そのまま差分を見る。
+        dv_win = dv[dv.index <= end].reset_index()
+        dv_win.columns = ["date", "amount"]
+        prof = build_profile(r.ticker, dv_win)
+        series = pd.Series(prof.series).sort_index()
+        in_window = series[(series.index > asof.year) & (series.index <= end.year)]
+        had_cut = bool((in_window.diff().dropna() < 0).any())
         rows.append({
             "ticker": r.ticker, "fy": fy,
             "payout_neg": r.payout_neg, "ocf_cover": r.ocf_cover,
