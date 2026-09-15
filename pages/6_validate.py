@@ -4,6 +4,9 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -39,7 +42,33 @@ outcome_col = OUTCOMES[outcome_label]
 if not years:
     st.stop()
 
-run = st.button("検証を実行", type="primary")
+_CACHE = Path(__file__).resolve().parent.parent / "data" / "validation.csv"
+
+
+def _load_cached() -> dict:
+    """前回の検証結果を読み直す。
+
+    コホートの構築には数分かかる。アプリを開くたびに計算し直していたら
+    誰も検証タブを見なくなるので、結果はファイルに残して次回は読むだけにする。
+    """
+    if not _CACHE.exists():
+        return {}
+    try:
+        df = pd.read_csv(_CACHE)
+        return {int(str(a)[:4]): g for a, g in df.groupby("asof")}
+    except Exception:
+        return {}
+
+
+if "validation_frames" not in st.session_state:
+    cached = _load_cached()
+    if cached:
+        st.session_state["validation_frames"] = cached
+        st.info(f"前回の検証結果を読み込みました（{len(cached)} コホート・"
+                f"{_CACHE.stat().st_mtime and datetime.fromtimestamp(_CACHE.stat().st_mtime):%Y-%m-%d %H:%M} 時点）。"
+                "条件を変えたいときは下の「検証を実行」を押してください。")
+
+run = st.button("検証を実行（数分かかります）", type="primary")
 if not run and "validation_frames" not in st.session_state:
     st.caption("実行には数分かかります。コマンドラインでも同じ検証ができます："
                "`uv run python scripts/validate_score.py`")
@@ -61,6 +90,10 @@ if run:
             frames[y] = df
     bar.progress(1.0, "完了")
     st.session_state["validation_frames"] = frames
+    if frames:
+        # 次に開いたときに計算し直さなくて済むよう保存する
+        pd.concat(frames.values(), ignore_index=True).to_csv(
+            _CACHE, index=False, encoding="utf-8-sig")
 
 frames = st.session_state.get("validation_frames", {})
 if not frames:
