@@ -19,7 +19,7 @@ def load_positions(config: dict) -> pd.DataFrame:
     q = read_df("SELECT ticker, last_close, pos_52w FROM quotes").set_index("ticker")
     u = read_df("SELECT ticker, code, name AS name_jpx, sector33, market FROM universe").set_index("ticker")
     sc = read_df(
-        "SELECT ticker, total, capacity, willingness, growth, neglect, valuation, "
+        "SELECT ticker, total, health, capacity, willingness, growth, neglect, valuation, "
         "trap_penalty, gate_passed, gate_reason FROM scores "
         "WHERE asof = (SELECT MAX(asof) FROM scores)"
     ).set_index("ticker")
@@ -101,30 +101,50 @@ def dividend_calendar(pos: pd.DataFrame) -> pd.DataFrame:
 
 
 def review_candidates(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """整理を検討すべき保有。判断はケンがする。ここは材料を並べるだけ。"""
+    """整理を検討すべき保有。判断はケンがする。ここは材料を並べるだけ。
+
+    重さを分ける。「配当が危ない」と「保有額が小さい」を同じ扱いにすると、
+    実測で114銘柄中99銘柄が候補になり、どれから手をつけるか分からなくなる。
+
+    重大   配当そのものが危ない（減配・基準逸脱・継続スコアが低い）
+    軽微   配当は問題ないが、額が小さく監視コストに見合わない
+    """
     if pos.empty:
         return pos
     total = pos["eval_value"].sum()
     out = pos.copy()
-    reasons = []
+    reasons, severities = [], []
     for _, r in out.iterrows():
         rs = []
+        serious = False
         reason = r.get("gate_reason") if isinstance(r.get("gate_reason"), str) else ""
         # 財務をまだ取りに行っていないだけの銘柄を「基準を外れた」と書くと、
         # 保有114銘柄のうち110銘柄が整理候補になり、シグナルとして役に立たない。
         hard = [x for x in reason.split(" / ") if x and "財務未取得" not in x]
         if r.get("gate_passed") == 0 and hard:
             rs.append(f"基準を外れた（{' / '.join(hard)}）")
-        if pd.notna(r.get("total")) and r["total"] < 40:
-            rs.append(f"スコアが低い（{r['total']:.0f}）")
+            serious = True
+        # 保有の評価に発掘スコア（total）を使ってはいけない。あれは「市場に
+        # 気づかれていないか」を含むので、大型株は構造的に低く出る（実測で
+        # 三菱商事の見過ごされ度は8点）。配当が続くかだけを見た health で判定する。
+        if pd.notna(r.get("health")) and r["health"] < 35:
+            rs.append(f"配当継続スコアが低い（{r['health']:.0f}）")
+            serious = True
         # ゲートは10年で減配1回まで許容している。1回を整理候補に挙げると
         # 採用基準と矛盾するので、ここも2回以上を対象にする。
         if (r.get("cuts_10y") or 0) >= 2:
             rs.append(f"10年で減配{int(r['cuts_10y'])}回")
+            serious = True
         if pd.notna(r.get("streak_no_cut")) and r["streak_no_cut"] == 0:
             rs.append("直近で減配")
+            serious = True
         if total and r["eval_value"] / total < 0.003:
-            rs.append("保有額が小さく監視コストに見合わない")
+            rs.append(f"保有額が小さい（全体の{r['eval_value'] / total:.1%}）")
         reasons.append(" / ".join(rs))
+        severities.append("重大" if serious else ("軽微" if rs else ""))
     out["整理を検討する理由"] = reasons
-    return out[out["整理を検討する理由"] != ""].sort_values("eval_value", ascending=False)
+    out["重さ"] = severities
+    out = out[out["整理を検討する理由"] != ""].copy()
+    # 重いものを上に、その中では金額の大きいものを上に
+    out["_o"] = out["重さ"].map({"重大": 0, "軽微": 1}).fillna(2)
+    return out.sort_values(["_o", "eval_value"], ascending=[True, False]).drop(columns="_o")

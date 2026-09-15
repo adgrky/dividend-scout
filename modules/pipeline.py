@@ -27,8 +27,8 @@ from modules.valuation import build_valuation_table
 ProgressFn = Callable[[float, str], None]
 
 _SCORE_COLS = ["ticker", "asof", "total", "capacity", "willingness", "growth",
-               "neglect", "valuation", "trap_penalty", "gate_passed", "gate_reason",
-               "detail_json"]
+               "neglect", "valuation", "trap_penalty", "health", "gate_passed",
+               "gate_reason", "detail_json"]
 
 
 def _safe_div(a, b):
@@ -107,6 +107,63 @@ def fetch_fundamentals(tickers, progress: ProgressFn | None = None,
         upsert_df("snapshots", snap, fnd.SNAPSHOT_COLS)
 
 
+def attach_edinet(df: pd.DataFrame) -> pd.DataFrame:
+    """EDINET（有価証券報告書）の値で上書きする。
+
+    yfinance の日本株ファンダは欠損と誤りがある（実測で配当性向480%）。
+    有報の「主要な経営指標等の推移」は金融庁に提出された確定値で、
+    配当性向・ROE・自己資本比率はいずれも日本基準の定義どおり。
+    取れているものは必ずこちらを優先する。
+
+    合わせて「配当政策」から読み取った方針スコア（累進配当・DOE・配当性向目標）を
+    増配意思の層に渡す。これが無いと、方針を明示している企業と何も言っていない
+    企業が同じ点数になる。
+    """
+    ed = read_df("SELECT * FROM edinet_summary")
+    prof = read_df("SELECT ticker, business_ja, employees, policy_score, policy_flags, "
+                   "ex_dividend_date, dividend_rate FROM company_profile")
+
+    out = df.copy()
+    out["edinet_years"] = 0
+    out["policy_bonus"] = 0.0
+
+    if not prof.empty:
+        prof = prof.set_index("ticker")
+        out["policy_bonus"] = out.index.map(prof["policy_score"]).astype(float)
+        out["policy_bonus"] = out["policy_bonus"].fillna(0.0)
+        out["ex_dividend_date"] = out.index.map(prof["ex_dividend_date"])
+        out["dividend_rate"] = out.index.map(prof["dividend_rate"])
+
+    if ed.empty:
+        return out
+
+    ed = ed.sort_values(["ticker", "fiscal_year"])
+    latest = ed.groupby("ticker").tail(1).set_index("ticker")
+    counts = ed.groupby("ticker").size()
+    out["edinet_years"] = out.index.map(counts).fillna(0).astype(int)
+
+    # 有報の確定値で上書き（取れているものだけ）
+    for col in ("payout_ratio", "roe", "equity_ratio"):
+        if col in latest.columns:
+            src = out.index.map(latest[col])
+            out[col] = pd.Series(src, index=out.index).astype(float).fillna(out[col])
+
+    # EPS の5年成長率。yfinance では4〜5期しか無く計算できないことが多い。
+    def _cagr(g: pd.DataFrame, col: str) -> float | None:
+        v = g[col].dropna()
+        if len(v) < 2 or v.iloc[0] <= 0 or v.iloc[-1] <= 0:
+            return None
+        return float((v.iloc[-1] / v.iloc[0]) ** (1 / (len(v) - 1)) - 1)
+
+    eps_cagr = ed.groupby("ticker").apply(lambda g: _cagr(g, "eps"), include_groups=False)
+    ocf_cagr = ed.groupby("ticker").apply(lambda g: _cagr(g, "operating_cf"), include_groups=False)
+    out["eps_cagr"] = out.index.map(eps_cagr)
+    # 原資成長は EPS の伸びで測るほうが素直（純利益は株数変動の影響を受ける）
+    out["ni_cagr"] = pd.Series(out.index.map(eps_cagr), index=out.index).fillna(out["ni_cagr"])
+    out["ocf_cagr"] = pd.Series(out.index.map(ocf_cagr), index=out.index).fillna(out["ocf_cagr"])
+    return out
+
+
 def attach_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
     fund = read_df("SELECT * FROM fundamentals")
     metrics = fnd.latest_metrics(fund)
@@ -149,7 +206,7 @@ def run_scoring(config: dict, asof: str | None = None,
     asof = asof or date.today().isoformat()
     if progress:
         progress(0.1, "特徴量を組み立て中...")
-    df = attach_fundamentals(load_base())
+    df = attach_edinet(attach_fundamentals(load_base()))
 
     if progress:
         progress(0.5, "ゲート判定中...")
@@ -166,7 +223,7 @@ def run_scoring(config: dict, asof: str | None = None,
     out = gated[["gate_passed", "gate_reason"]].copy()
     out["gate_passed"] = out["gate_passed"].astype(int)
     for col in ["total", "capacity", "willingness", "growth", "neglect", "valuation",
-                "trap_penalty", "detail_json"]:
+                "trap_penalty", "health", "detail_json"]:
         out[col] = scores[col] if col in scores.columns else None
     out["asof"] = asof
     out = out.reset_index().rename(columns={"index": "ticker"})
@@ -175,6 +232,7 @@ def run_scoring(config: dict, asof: str | None = None,
     if progress:
         n = int(out["gate_passed"].sum())
         progress(1.0, f"完了：ゲート通過 {n} / {len(out)} 銘柄")
-    return gated.join(scores[["total"] + scoring.LAYERS + ["trap_penalty"]], how="left")
+    return gated.join(scores[["total", "health"] + scoring.LAYERS + ["trap_penalty"]],
+                      how="left")
 
 

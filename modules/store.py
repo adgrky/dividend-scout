@@ -11,10 +11,15 @@ ORM は使わず生 SQL。DB はローカルが唯一の正で、保有情報は
     splits        株式分割・併合（DPS を遡って調整するために必要）
     fundamentals  財務5期分。絞り込み後の銘柄だけ埋まる
     scores        日付つきスナップショット。検証の生命線なので上書きしない
+                  total  = 発掘スコア（市場に見過ごされているか を含む）
+                  health = 配当継続スコア（配当が続くか だけを見る。保有の評価用）
     holdings      保有（口座別）
     transactions  売買記録
     watchlist     監視銘柄と目標利回り
     alerts        監視が拾った異変
+    edinet_index  証券コード → 有価証券報告書の docID
+    edinet_summary 有報の「主要な経営指標等の推移」5年分（日本基準の正確な値）
+    company_profile 事業の内容・従業員数・権利確定日・会社予想配当
     settings      key-value
 """
 from __future__ import annotations
@@ -114,6 +119,7 @@ CREATE TABLE IF NOT EXISTS scores (
     neglect     REAL,
     valuation   REAL,
     trap_penalty REAL,
+    health      REAL,               -- 配当継続スコア（発掘スコアとは別物）
     gate_passed INTEGER,
     gate_reason TEXT,
     detail_json TEXT,               -- 各指標の生値。カルテで内訳を開示するため
@@ -173,6 +179,47 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at  TEXT
 );
 
+CREATE TABLE IF NOT EXISTS edinet_index (
+    code        TEXT PRIMARY KEY,   -- 証券コード4桁
+    doc_id      TEXT NOT NULL,
+    filer_name  TEXT,
+    period_end  TEXT,
+    submit_date TEXT,
+    fetched_at  TEXT                -- XBRL を取得済みなら日時
+);
+
+CREATE TABLE IF NOT EXISTS edinet_summary (   -- 主要な経営指標等の推移（5年分）
+    ticker          TEXT NOT NULL,
+    fiscal_year     INTEGER NOT NULL,
+    sales           REAL,
+    ordinary_income REAL,
+    net_income      REAL,
+    eps             REAL,
+    dps             REAL,
+    payout_ratio    REAL,
+    roe             REAL,
+    equity_ratio    REAL,
+    net_assets      REAL,
+    total_assets    REAL,
+    operating_cf    REAL,
+    employees       REAL,
+    PRIMARY KEY (ticker, fiscal_year)
+);
+
+CREATE TABLE IF NOT EXISTS company_profile (
+    ticker          TEXT PRIMARY KEY,
+    business_ja     TEXT,    -- 有報の「事業の内容」（日本語）
+    business_en     TEXT,    -- yfinance の英文サマリ（有報が無いときの代替）
+    employees       REAL,
+    ex_dividend_date TEXT,   -- 次回（直近）の権利確定日
+    dividend_rate   REAL,    -- 会社予想の年間配当
+    industry_en     TEXT,
+    dividend_policy TEXT,    -- 有報の「配当政策」本文
+    policy_flags    TEXT,    -- 累進配当・DOE・配当性向目標などの検出結果（JSON）
+    policy_score    REAL,    -- 0〜1。増配意思スコアに使う
+    updated_at      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS scan_runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at  TEXT,
@@ -198,9 +245,24 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# 既存テーブルに後から足した列。CREATE TABLE IF NOT EXISTS は列を追加しないので、
+# ここで ALTER TABLE を当てる。すでにある場合の例外は握りつぶす。
+_MIGRATIONS = [
+    ("scores", "health", "REAL"),
+    ("company_profile", "dividend_policy", "TEXT"),
+    ("company_profile", "policy_flags", "TEXT"),
+    ("company_profile", "policy_score", "REAL"),
+]
+
+
 def init_db(path: Path | None = None) -> None:
     with connect(path) as conn:
         conn.executescript(_DDL)
+        for table, column, coltype in _MIGRATIONS:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+            except sqlite3.OperationalError:
+                pass   # 既にある
 
 
 def upsert_df(table: str, df: pd.DataFrame, columns: Iterable[str],

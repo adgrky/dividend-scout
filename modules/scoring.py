@@ -28,6 +28,15 @@ import pandas as pd
 
 LAYERS = ["capacity", "willingness", "growth", "neglect", "valuation"]
 
+# 配当継続スコア（health）に使う層。
+# 発掘スコア（total）には「見過ごされ度」と「割安」が入っているが、これは
+# 「市場がまだ気づいていないか」を測る指標であって、「配当が続くか」ではない。
+# 実測: 三菱商事の見過ごされ度は8点、JR東日本は7点、NTTは19点。大型株は
+# 定義上ここで沈む。この total をそのまま保有の評価に使うと、累進配当で
+# 10年連続増配している三菱商事が「スコアが低い」という理由だけで整理候補に並ぶ。
+# 保有を評価するときは、配当の余力・意思・原資だけを見る。
+HEALTH_LAYERS = ["capacity", "willingness", "growth"]
+
 
 # ──────────────────────────────── 正規化 ────────────────────────────────
 
@@ -157,6 +166,8 @@ def score_willingness(df: pd.DataFrame, config: dict) -> tuple[pd.Series, dict]:
         "減配なし継続年数": pct_rank(df["streak_no_cut"]),
         "DPS 5年成長": pct_rank(df["cagr_5y"]),
         "DPS 10年成長": pct_rank(df["cagr_10y"]),
+        # 有報の「配当政策」から検出した方針。累進配当・DOE・配当性向目標を
+        # 掲げている会社は、利益が一時的に落ちても配当を維持する圧力が働く。
         "配当方針の明示": policy * 100.0,
     }
     return pd.DataFrame(parts).mean(axis=1), parts
@@ -236,6 +247,9 @@ def compute_scores(df: pd.DataFrame, config: dict, trap_penalty: pd.Series | Non
     out = layers.copy()
     out["trap_penalty"] = penalty
     out["total"] = total
+    # 配当継続スコア：市場の評価（見過ごされ度・割安）を外し、
+    # 配当を出し続けられるか・出す気があるか・原資が伸びているか だけで測る。
+    out["health"] = (layers[HEALTH_LAYERS].mean(axis=1) - penalty).clip(lower=0.0)
     out["gate_passed"] = 1
 
     # 内訳は JSON にして丸ごと残す。カルテで「なぜこの点なのか」を全部見せるため。
@@ -252,6 +266,7 @@ def compute_scores(df: pd.DataFrame, config: dict, trap_penalty: pd.Series | Non
 
 
 _RAW_KEYS = ["dividend_yield", "yield_percentile", "dps_latest", "hem_ratio",
+             "policy_bonus", "edinet_years", "eps_cagr", "ex_dividend_date",
              "streak", "streak_no_cut",
              "cuts_10y", "cagr_5y", "cagr_10y", "payout_ratio", "fcf_cover",
              "net_cash_ratio", "net_debt_to_ocf", "equity_ratio", "roe", "per", "pbr",

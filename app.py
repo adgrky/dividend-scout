@@ -24,5 +24,6 @@ pages = [
     st.Page("pages/4_allocate.py", title="資金投入", icon="💰"),
     st.Page("pages/5_portfolio.py", title="ポートフォリオ", icon="📊"),
     st.Page("pages/6_validate.py", title="検証", icon="🧪"),
+    st.Page("pages/7_guide.py", title="使い方", icon="📖"),
 ]
 st.navigation(pages).run()
