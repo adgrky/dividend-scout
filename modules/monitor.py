@@ -135,7 +135,9 @@ def build_alerts(config: dict) -> pd.DataFrame:
 
         # 3) トラップ検出
         penalty = r.get("trap_penalty") or 0
-        if penalty >= 12:
+        # 買う側の足切りと同じ値を使う。ここだけ別の数字にすると、
+        # 「買う画面では弾くのに監視では警告しない」帯ができる。
+        if penalty >= max_trap:
             add(ticker, "medium", "trap", f"{name}: 高配当トラップの兆候（減点 {penalty:.0f}）")
 
         # 4) 指値到達

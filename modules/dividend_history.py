@@ -27,7 +27,6 @@ from datetime import date
 import math
 from dataclasses import dataclass, field, asdict
 
-import numpy as np
 import pandas as pd
 
 # スパイク判定：前年比でこの倍率を超え、かつ翌年に前年並みへ戻ったら記念配当を疑う

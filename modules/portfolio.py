@@ -98,8 +98,6 @@ def dividend_calendar(pos: pd.DataFrame) -> pd.DataFrame:
     full = pd.DataFrame({"month": range(1, 13)}).merge(cal, on="month", how="left").fillna(0)
     full["label"] = full["month"].map(lambda m: f"{m}月")
     return full
-
-
 def review_candidates(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
     """
     ※ 使っていない。modules/sell_rules.evaluate に置き換え済み（買う基準を売る基準に流用していたため）。

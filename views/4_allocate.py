@@ -20,9 +20,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from modules import market, review as R, sell_rules as SR
-from modules.allocator import allocate, buy_gate, buy_priority, month_gaps, rebalance_funds
+from modules.allocator import allocate, buy_gate, buy_priority, month_gaps
 from modules.format import to_pct, yen, yen_short
-from modules.portfolio import dividend_calendar, freed_cash, sector_exposure
+from modules.portfolio import dividend_calendar, freed_cash
 from modules.store import connect, read_df
 from modules.ui import flash, show_flash, get_config, get_positions, get_scores, no_data_guard
 

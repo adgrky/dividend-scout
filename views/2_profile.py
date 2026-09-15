@@ -18,7 +18,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from modules import explain as E, peers as P
-from modules.format import pct, to_pct, yen, yen_short
+from modules.format import pct, to_pct, yen
 from modules.store import read_df
 from modules.ui import (flash, show_flash, LAYER_LABELS, get_config, get_dividend_profile,
                         get_next_ex_dates, get_prices, get_scores, no_data_guard)

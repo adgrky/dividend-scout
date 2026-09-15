@@ -53,8 +53,6 @@ def attach(review: pd.DataFrame) -> pd.DataFrame:
                  for k in idx]
     out["判断日"] = [key["decided_at"].get(k, "") if k in key.index else "" for k in idx]
     return out
-
-
 def sell_priority(review: pd.DataFrame, config: dict) -> pd.DataFrame:
     """
     ※ 使っていない。整理の優先度は modules/sell_rules.evaluate が出す。
@@ -72,8 +70,6 @@ def sell_priority(review: pd.DataFrame, config: dict) -> pd.DataFrame:
     tax_ease = (-out["pnl_pct"].fillna(0) * 100).clip(-50, 50) + 50
     out["整理の優先度"] = (0.5 * danger + 0.3 * size + 0.2 * tax_ease).round(0)
     return out.sort_values("整理の優先度", ascending=False)
-
-
 def capital_gain_tax(pos_row: pd.Series, shares: float, price: float, config: dict) -> float:
     """売却時にかかる税金の見込み（特定口座のみ。NISAは非課税）。"""
     if pos_row.get("account") == "nisa":

@@ -58,6 +58,12 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
     高配当トラップ判定（最大19点）の銘柄だった。
     """
     cap = config["portfolio"]["max_sector_weight"]
+    # 重みは必ず config から読む。ここに数字を直書きすると、config.yaml を直しても
+    # 何も起きない「効かないつまみ」になる（実際そうなっていた）。
+    bp = config.get("buy_priority", {})
+    w_self = float(bp.get("self_yield_weight", 0.6))
+    w_abs = float(bp.get("abs_yield_weight", 0.4))
+    swing = float(bp.get("fit_swing", 0.2))
     total_eval = positions["eval_value"].sum() if not positions.empty else 0.0
     sector_now = (positions.groupby("sector33")["eval_value"].sum()
                   if not positions.empty else pd.Series(dtype=float))
@@ -72,7 +78,7 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
     # インカムとしては物足りない銘柄が上位に来る。両方を混ぜる。
     self_rank = (c["yield_percentile"].fillna(0.5) * 100).clip(0, 100)
     abs_rank = c["dividend_yield"].rank(pct=True) * 100
-    c["_割安度"] = (0.6 * self_rank + 0.4 * abs_rank.fillna(50)).clip(0, 100)
+    c["_割安度"] = (w_self * self_rank + w_abs * abs_rank.fillna(50)).clip(0, 100)
     c["_自己利回り順位"] = self_rank
     c["_絶対利回り順位"] = abs_rank.fillna(50)
 
@@ -104,12 +110,14 @@ def buy_priority(cand: pd.DataFrame, positions: pd.DataFrame, config: dict,
     c["_目標到達"] = (c["dividend_yield"] / tgt * 100).clip(0, 200).fillna(0)
 
     base = np.sqrt(c["_割安度"].clip(lower=0) * c["_継続"].clip(lower=0))
-    tiebreak = 0.9 + 0.2 * c["_補完度"] / 100
+    tiebreak = (1 - swing / 2) + swing * c["_補完度"] / 100
     # trap_penalty 列が無い呼び出し元があるので、Series で受けてから引く
     # （c.get(..., 0) は列が無いと int の 0 を返すため .fillna で落ちる）
     penalty = c["trap_penalty"].fillna(0) if "trap_penalty" in c.columns \
         else pd.Series(0.0, index=c.index)
-    c["買い付け優先度"] = (base * tiebreak - penalty).clip(lower=0)
+    # 0〜100 に収める。補完度の幅を広げると100を超えることがあり、
+    # 画面のバー（上限100）が振り切れて読めなくなる。
+    c["買い付け優先度"] = (base * tiebreak - penalty).clip(lower=0, upper=100)
     return c
 
 
@@ -317,8 +325,6 @@ def _odd_lot_fee(amount: float, shares: int, lot: int) -> float:
     単元で買うなら手数料はほぼ無視できるので0。
     """
     return round(amount * 0.0022, 0) if lot < 100 else 0.0
-
-
 def rebalance_funds(review: pd.DataFrame) -> float:
     """整理候補を売却した場合に作れる資金。"""
     if review is None or review.empty:

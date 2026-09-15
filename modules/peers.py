@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 import pandas as pd
 
 # 比較する項目（列名, raw のキー, 高いほうが良いか, 表示形式）

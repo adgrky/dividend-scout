@@ -10,7 +10,6 @@ yfinance には壊れた銘柄が混ざる。実測した例:
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 # 株価が1週間で何倍まで動きうるか。分割調整済みの終値なので、
