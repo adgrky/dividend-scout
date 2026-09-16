@@ -96,6 +96,33 @@ def audit_numbers() -> None:
                     require_below_target=False, month_gap=gaps, lot=100)
     chk("単元モードでは100株の倍数", (p100["株数"] % 100 == 0).all())
 
+    section("A3.5 配当の偏りの上限が効いているか")
+    # 2026-09-16 の検証14・9 で入れた上限。評価額ではなく**配当**にかけている。
+    cyc = set(cfg.get("cyclical", {}).get("sectors", []))
+    cap_cyc = float(cfg.get("cyclical", {}).get("max_income_share", 1.0))
+    cap_one = float(cfg["portfolio"].get("max_income_weight", 1.0))
+    inc_now = pos.groupby("ticker")["annual_dividend"].sum()
+    cyc_now = float(pos.loc[pos["sector33"].isin(cyc), "annual_dividend"].sum())
+    base = float(pos["annual_dividend"].sum())
+    for cash in (100_000, 1_000_000):
+        plan = allocate(cash, cand, pos, cfg, max_names=30, lot=1,
+                        require_below_target=False)
+        if plan.empty:
+            continue
+        after = base + plan["年間配当"].sum()
+        add_cyc = plan.loc[plan["業種"].isin(cyc), "年間配当"].sum()
+        share = (cyc_now + add_cyc) / after if after else 0.0
+        before = cyc_now / base if base else 0.0
+        chk(f"入金 {cash:,}：景気敏感の配当シェアが悪化しない",
+            share <= before + 1e-9, f"{before:.1%} → {share:.1%}")
+        worst = 0.0
+        for r in plan.itertuples():
+            mine = float(inc_now.get(r.ticker, 0.0)) + r.年間配当
+            worst = max(worst, mine / after if after else 0.0)
+        chk(f"入金 {cash:,}：1銘柄の配当シェアが上限を超えない",
+            worst <= cap_one + 1e-6 or worst <= (inc_now.max() / base if base else 1),
+            f"最大 {worst:.1%}（上限 {cap_one:.0%}）")
+
     section("A4 売り判定")
     ev = SR.evaluate(pos, cfg)
     chk("優先度が 0〜100 に収まる", ev["整理の優先度"].between(0, 100).all())

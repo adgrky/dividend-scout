@@ -51,8 +51,8 @@ st.caption(f"保有 {len(positions)} 銘柄 ／ 1銘柄あたり平均 {yen_shor
 # インカム投資の目的は「配当が育つこと」なので、推移が見えないと成果が分からない。
 record_equity(positions, config)
 
-tab1, tab7, tab2, tab3, tab6, tab4, tab5 = st.tabs(
-    ["保有一覧", "配当の強さ", "業種の配分", "配当月", "次の権利落ち日",
+tab1, tab7, tab8, tab2, tab3, tab6, tab4, tab5 = st.tabs(
+    ["保有一覧", "配当の強さ", "NISA枠", "業種の配分", "配当月", "次の権利落ち日",
      "配当の受取記録", "推移"])
 
 with tab1:
@@ -333,6 +333,110 @@ with tab7:
                 format="%.1f%%", help="インカムを守るなら、こちらを見ます"),
             "差": st.column_config.NumberColumn(
                 format="%+.1f%%", help="プラスなら「評価額の割に配当を多く出している業種」")})
+
+with tab8:
+    from modules import nisa as NI
+
+    st.markdown("#### NISA枠をどう使うか")
+    st.caption("売らずに持ち続けるなら、NISAの値打ちは **配当への課税 20.315% が消えること** に"
+               "ほぼ尽きます（値上がり益の非課税は、売らないかぎり実現しないので）。"
+               "だから **枠には利回りが高い銘柄を入れる**。それだけです。")
+
+    c1, c2 = st.columns([1, 1])
+    monthly = c1.number_input("毎月いくら入金しますか", min_value=0, max_value=1_000_000,
+                              value=100_000, step=10_000, format="%d",
+                              help="新規買いを先に枠に入れ、余った年間枠で移し替えを考えます")
+    horizon = c2.slider("何年持ち続ける前提か", 5, 40, 20, 5,
+                        help="移し替えが得かどうかは、持つ年数で決まります")
+
+    r = NI.plan(positions, float(monthly), int(horizon))
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("成長投資枠の残り", yen_short(r["残りの枠"]),
+              f"生涯 {yen_short(NI.GROWTH_LIFETIME)} − 簿価 {yen_short(r['使った枠'])}",
+              delta_color="off", help="枠は時価ではなく**簿価（取得額）**で数えます")
+    m2.metric("埋めきるまで", f"最短 {r['最短何年']:.0f} 年",
+              f"年 {yen_short(r['年間の枠'])} まで", delta_color="off")
+    m3.metric("特定口座で払っている税", f"年 {yen_short(r['特定の税'])}",
+              f"{horizon}年で {yen_short(r['特定の税'] * horizon)}", delta_color="off",
+              help="いまの配当が変わらないとした場合。増配すればもっと増えます")
+    m4.metric("利回り NISA / 特定", f"{r['NISAの利回り']:.2%} / {r['特定の利回り']:.2%}",
+              help="NISAのほうが高ければ、枠の使い方としては正しい向きです")
+
+    st.markdown("##### 今年の枠の使いみち")
+    st.info(f"年間枠 {yen(NI.GROWTH_ANNUAL)} のうち、"
+            f"**新規買いに {yen(r['今年の新規買いに使う枠'])}**、"
+            f"**移し替えに使えるのが {yen(r['今年の移し替えに使える枠'])}**。\n\n"
+            "移し替えより新規買いが優先です。新規買いには含み益への課税が無く、"
+            "コストがゼロだからです。**2つは同じ年240万円を奪い合います。**")
+
+    moves = r["移す銘柄"]
+    if r["今年の移し替えに使える枠"] <= 0:
+        st.success("入金だけで年間枠を使い切ります。移し替えを考える必要はありません。")
+    elif moves.empty:
+        st.info(f"{horizon}年持つ前提では、移して得になる銘柄がありません。")
+    else:
+        st.markdown(f"##### 今年移すなら、この順番（{horizon}年で {yen(r['移して得られる額'])} の得）")
+        show = moves[["code", "name_jpx", "使う枠", "含み益", "annual_dividend",
+                      "回収年数", f"{horizon}年の得"]].copy()
+        show["回収年数"] = show["回収年数"].map(
+            lambda v: "即得" if v <= 0 else (f"{v:.1f}年" if pd.notna(v) and v < 1e6 else "—"))
+        if "一部だけ" in moves.columns and moves["一部だけ"].any():
+            show["銘柄"] = [f"{n}{'（一部）' if part else ''}"
+                          for n, part in zip(moves["name_jpx"], moves["一部だけ"])]
+            show = show.drop(columns=["name_jpx"])
+            show = show[["code", "銘柄", "使う枠", "含み益", "annual_dividend",
+                         "回収年数", f"{horizon}年の得"]]
+        show.columns = ["コード", "銘柄", "使う枠", "含み益", "年間配当",
+                        "回収年数", f"{horizon}年の得"]
+        st.dataframe(show, hide_index=True, width="stretch", column_config={
+            "使う枠": st.column_config.NumberColumn(format="¥%d"),
+            "含み益": st.column_config.NumberColumn(format="¥%d"),
+            "年間配当": st.column_config.NumberColumn(format="¥%d"),
+            f"{horizon}年の得": st.column_config.NumberColumn(format="¥%d"),
+        })
+        st.caption(f"全部移せるだけの枠があれば {yen(r['全部移した場合の得'])} の得になります"
+                   f"（年間枠の制限で、今年はここまで）。"
+                   "**枠は簿価で数えるので、売った枠が戻るのは翌年1月1日です。**")
+
+    with st.expander("移すかどうかは、たった1つの式で決まる"):
+        st.markdown(f"""
+移すには一度売るので、**含み益に 20.315% の税がかかります**。
+一方で、移したあとは毎年の配当が非課税になります。
+
+| | |
+|---|---|
+| 移すコスト（1回だけ） | 含み益 × 20.315% |
+| 移す便益（毎年） | 年間配当 × 20.315% |
+| **回収にかかる年数** | **含み益 ÷ 年間配当** |
+
+つまり **含み益が年間配当の何倍あるか** だけで決まります。
+{horizon}年持つなら、回収年数が {horizon} 年より短い銘柄は移す価値があります。
+
+**含み損の銘柄は話が逆**です。売れば損失が確定して同じ年の利益と通算できるので、
+コストがマイナスになります。ただし **同じ年に他で利益を確定している場合だけ** なので、
+この表では戻りを数えていません（数えなくても、コストがゼロなのでどのみち移す価値があります）。
+
+**制度の確認（2026-09-16 に裏取り）**
+成長投資枠 年240万円・生涯1,200万円（NISA全体1,800万円のうち）。
+売却すると翌年1月1日に簿価ぶんの生涯枠が復活しますが、年間投資枠は復活しません。
+""")
+
+    mis = NI.misplaced(positions)
+    if mis:
+        lo, hi = mis["NISAにある低利回り"], mis["特定にある高利回り"]
+        st.markdown("##### 置き場所が逆になっている銘柄")
+        st.caption(f"保有全体の利回りの真ん中は {mis['境目の利回り']:.2%}。"
+                   "それより低い銘柄がNISAにあり、高い銘柄が特定口座にあるなら、"
+                   "枠の使い方としては損をしています。")
+        k1, k2 = st.columns(2)
+        k1.metric("NISAにある低利回り", f"{len(lo)} 銘柄", yen_short(lo["eval_value"].sum()),
+                  delta_color="off")
+        k2.metric("特定にある高利回り", f"{len(hi)} 銘柄", yen_short(hi["eval_value"].sum()),
+                  delta_color="off")
+        st.caption("ただし入れ替えるには NISA 側を売る必要があり、**枠が戻るのは翌年**。"
+                   "年間枠240万円は復活しません。急ぐ理由はありません。"
+                   "まず新規買いで枠を埋めるのが先です。")
+
 
 with tab2:
     exposure = sector_exposure(positions, config)

@@ -212,6 +212,23 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
     sector_now = (positions.groupby("sector33")["eval_value"].sum()
                   if not positions.empty else pd.Series(dtype=float))
 
+    # ── 配当の偏りに上限をかける ──
+    # 評価額の上限だけでは、インカムの偏りは止まらない。高利回りの銘柄は
+    # 評価額より配当のほうが大きく偏る（実測: 景気敏感業種は評価額22.2%に対して
+    # 配当29.5%）。守りたいのはインカムなので、配当側にも上限を置く。
+    cap_income = float(config["portfolio"].get("max_income_weight", 1.0))
+    cyc = config.get("cyclical", {})
+    cyc_sectors = set(cyc.get("sectors", []))
+    cap_cyc = float(cyc.get("max_income_share", 1.0))
+    income_now = (positions.groupby("ticker")["annual_dividend"].sum()
+                  if not positions.empty and "annual_dividend" in positions.columns
+                  else pd.Series(dtype=float))
+    cyc_income_now = float(
+        positions.loc[positions["sector33"].isin(cyc_sectors), "annual_dividend"].sum()
+        if not positions.empty and "annual_dividend" in positions.columns
+        and cyc_sectors else 0.0)
+    income_base = float(income_now.sum())
+
     c = candidates[candidates["last_close"].fillna(0) > 0].copy()
     if require_below_target and "target_yield" in c.columns:
         c = c[c["dividend_yield"].fillna(0) >= c["target_yield"].fillna(0)]
@@ -254,6 +271,27 @@ def allocate(cash: float, candidates: pd.DataFrame, positions: pd.DataFrame,
                 return False
             shares = lot          # 上限は超えるが1単元だけ入れる
         amount = shares * price
+
+        # 配当の偏りの上限。買ったあとの姿で判定する。
+        y = float(r.get("dividend_yield") or 0.0)
+        if y > 0 and income_base > 0:
+            added = sum(p["年間配当"] for p in picks)
+            total_income = income_base + added + amount * y
+            if total_income > 0:
+                mine = float(income_now.get(r["ticker"], 0.0)) + amount * y
+                if mine / total_income > cap_income:
+                    # 上限に収まる金額まで減らす。単元に満たなければ見送る
+                    room_income = cap_income * total_income - float(
+                        income_now.get(r["ticker"], 0.0))
+                    shares = _lot_size(price, max(0.0, room_income / y), lot)
+                    if shares < lot:
+                        return False
+                    amount = shares * price
+                if sector in cyc_sectors:
+                    cyc_after = cyc_income_now + sum(
+                        p["年間配当"] for p in picks if p["業種"] in cyc_sectors)
+                    if (cyc_after + amount * y) / total_income > cap_cyc:
+                        return False
         if amount < min_ticket and remaining > min_ticket:
             return False        # 細切れは作らない（お金が尽きかけている時だけ許す）
         picks.append(_pick(r, sector, shares, amount, cap_sector * total_after - used,
