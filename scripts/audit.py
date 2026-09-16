@@ -566,6 +566,29 @@ def audit_code() -> None:
                 dirty.append(f"{table}.{c} に {int(n)} 行")
     chk("数値の列に文字列が入っていない", not dirty, "／".join(dirty))
 
+    # E8 config.yaml を書き換えたら、その場で効くか
+    # 実測（2026-09-16）: load_config が lru_cache でプロセスに固めていたため、
+    # 大人買いラインの段を書き換えてもアプリは古い段を出し続けた。しかも
+    # 画面には何の手がかりも出ない。「コードに数値を直書きしない」と決めている以上、
+    # 設定が効かないのは黙って壊れているのと同じ。
+    import time as _t
+    from modules.config import load_config as _lc
+    cfg_path = root / "config.yaml"
+    original = cfg_path.read_text(encoding="utf-8")
+    before = _lc()["portfolio"]["max_sector_weight"]
+    try:
+        cfg_path.write_text(
+            original.replace(f"max_sector_weight: {before}",
+                             "max_sector_weight: 0.999"), encoding="utf-8")
+        _t.sleep(0.02)
+        after = _lc()["portfolio"]["max_sector_weight"]
+    finally:
+        cfg_path.write_text(original, encoding="utf-8")
+        _t.sleep(0.02)
+        _lc()
+    chk("config.yaml を書き換えたら、その場で効く", after == 0.999,
+        f"NG なら書き換えが効いていない（読めた値 {after}）")
+
 
 def main() -> int:
     print("=" * 62)

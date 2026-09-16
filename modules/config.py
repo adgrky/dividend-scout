@@ -13,10 +13,28 @@ import yaml
 APP_DIR = Path(__file__).resolve().parent.parent
 
 
-@lru_cache(maxsize=1)
-def load_config() -> dict:
+@lru_cache(maxsize=4)
+def _read_config(_stamp: float) -> dict:
     with open(APP_DIR / "config.yaml", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_config() -> dict:
+    """設定を読む。**config.yaml を書き換えたら、その場で効く。**
+
+    以前はプロセスのあいだ1回だけ読んで固めていた。そのせいで、閾値や重みを
+    直してもアプリを再起動するまで反映されず、しかも画面には何の手がかりも
+    出なかった（実測: 大人買いラインの段を書き換えたのに、古い段が表示され続けた）。
+    「コードに数値を直書きしない」と決めている以上、設定を直したら効かないと困る。
+
+    ファイルの更新時刻をキーにして読み直す。中身が変わっていなければ
+    キャッシュがそのまま返るので、読み込みの負担は増えない。
+    """
+    try:
+        stamp = (APP_DIR / "config.yaml").stat().st_mtime
+    except OSError:
+        stamp = 0.0
+    return _read_config(stamp)
 
 
 def db_path(config: dict | None = None) -> Path:
