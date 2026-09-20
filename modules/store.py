@@ -41,13 +41,16 @@ import pandas as pd
 
 from modules.config import db_path
 
-# 保有・売買・監視など「積立の管理」に関わるテーブルだけをクラウド(Turso)に同期する。
-# 発掘用の株価履歴・財務データはパソコンにしか置かない（重すぎるため）。
+# 保有・売買・監視など「積立の管理」に関わるテーブルと、それを画面に出すのに
+# 要る軽量な参照データ（銘柄名・現在値・配当履歴・スコア・財務・相場水準）を
+# クラウド(Turso)に同期する。重すぎる週足の株価履歴(prices)だけはパソコン専用。
 # TURSO_DATABASE_URL/TURSO_AUTH_TOKEN が環境変数にあれば、これらのテーブルへの
 # SQL はすべて自動でクラウド側に振り分けられる（呼び出し側は意識しなくてよい）。
 CLOUD_TABLES = {
     "holdings", "transactions", "watchlist", "alerts",
     "settings", "holding_review", "equity_history",
+    "universe", "quotes", "dividends", "scores",
+    "fundamentals", "market_history",
 }
 
 _DDL = """
@@ -279,8 +282,80 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 """
 
 # クラウド(Turso)側に作るテーブルは CLOUD_TABLES の分だけ。上の _DDL から該当部分を
-# そのまま抜き出したもの。発掘用のテーブルはクラウドには作らない。
+# そのまま抜き出したもの。発掘用の重いテーブル(prices 等)はクラウドには作らない。
 _DDL_CLOUD = """
+CREATE TABLE IF NOT EXISTS universe (
+    ticker      TEXT PRIMARY KEY,
+    code        TEXT NOT NULL,
+    name        TEXT,
+    sector33    TEXT,
+    market      TEXT,
+    scale       TEXT,
+    updated_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS quotes (
+    ticker          TEXT PRIMARY KEY,
+    asof            TEXT,
+    last_close      REAL,
+    high_52w        REAL,
+    low_52w         REAL,
+    pos_52w         REAL,
+    avg_turnover    REAL,
+    ret_1y          REAL,
+    listing_start   TEXT,
+    n_bars          INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS dividends (
+    ticker  TEXT NOT NULL,
+    date    TEXT NOT NULL,
+    amount  REAL NOT NULL,
+    PRIMARY KEY (ticker, date)
+);
+
+CREATE TABLE IF NOT EXISTS scores (
+    ticker      TEXT NOT NULL,
+    asof        TEXT NOT NULL,
+    total       REAL,
+    capacity    REAL,
+    willingness REAL,
+    growth      REAL,
+    neglect     REAL,
+    valuation   REAL,
+    trap_penalty REAL,
+    health      REAL,
+    gate_passed INTEGER,
+    gate_reason TEXT,
+    detail_json TEXT,
+    PRIMARY KEY (ticker, asof)
+);
+
+CREATE TABLE IF NOT EXISTS fundamentals (
+    ticker          TEXT NOT NULL,
+    fiscal_end      TEXT NOT NULL,
+    net_income      REAL,
+    revenue         REAL,
+    operating_income REAL,
+    operating_cf    REAL,
+    free_cf         REAL,
+    total_equity    REAL,
+    total_assets    REAL,
+    total_debt      REAL,
+    cash            REAL,
+    shares          REAL,
+    PRIMARY KEY (ticker, fiscal_end)
+);
+
+CREATE TABLE IF NOT EXISTS market_history (
+    date            TEXT PRIMARY KEY,
+    nikkei          REAL,
+    pbr_weighted    REAL,
+    pbr_index       REAL,
+    pct_10y         REAL,
+    vs_ma200        REAL
+);
+
 CREATE TABLE IF NOT EXISTS holdings (
     account     TEXT NOT NULL,
     ticker      TEXT NOT NULL,
@@ -412,7 +487,7 @@ class _TursoHttpConn:
             headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())["results"]
 
     @staticmethod
