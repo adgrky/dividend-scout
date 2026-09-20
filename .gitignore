@@ -1,6 +1,8 @@
 # データ（DBとキャッシュはローカルが正）
 data/*.db
 data/*.db-journal
+data/*.db-shm
+data/*.db-wal
 data/cache/
 data/edinet_cache/
 data/*.pkl
