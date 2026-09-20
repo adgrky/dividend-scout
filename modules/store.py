@@ -30,7 +30,9 @@ from __future__ import annotations
 import math
 
 import json
+import os
 import sqlite3
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -38,6 +40,15 @@ from typing import Iterable, Iterator
 import pandas as pd
 
 from modules.config import db_path
+
+# 保有・売買・監視など「積立の管理」に関わるテーブルだけをクラウド(Turso)に同期する。
+# 発掘用の株価履歴・財務データはパソコンにしか置かない（重すぎるため）。
+# TURSO_DATABASE_URL/TURSO_AUTH_TOKEN が環境変数にあれば、これらのテーブルへの
+# SQL はすべて自動でクラウド側に振り分けられる（呼び出し側は意識しなくてよい）。
+CLOUD_TABLES = {
+    "holdings", "transactions", "watchlist", "alerts",
+    "settings", "holding_review", "equity_history",
+}
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS universe (
@@ -267,18 +278,288 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 );
 """
 
+# クラウド(Turso)側に作るテーブルは CLOUD_TABLES の分だけ。上の _DDL から該当部分を
+# そのまま抜き出したもの。発掘用のテーブルはクラウドには作らない。
+_DDL_CLOUD = """
+CREATE TABLE IF NOT EXISTS holdings (
+    account     TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    name        TEXT,
+    shares      REAL NOT NULL,
+    avg_cost    REAL,
+    target_yield REAL,
+    bottom_yield REAL,
+    updated_at  TEXT,
+    PRIMARY KEY (account, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    date    TEXT NOT NULL,
+    account TEXT,
+    ticker  TEXT,
+    name    TEXT,
+    type    TEXT,
+    shares  REAL,
+    price   REAL,
+    fee     REAL,
+    memo    TEXT,
+    ref_date TEXT,
+    tax     REAL
+);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    ticker      TEXT PRIMARY KEY,
+    name        TEXT,
+    target_yield REAL,
+    bottom_yield REAL,
+    source      TEXT,
+    thesis      TEXT,
+    invalidation TEXT,
+    added_at    TEXT,
+    note        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at TEXT NOT NULL,
+    ticker      TEXT,
+    severity    TEXT,
+    kind        TEXT,
+    message     TEXT,
+    resolved    INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT,
+    updated_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS equity_history (
+    date            TEXT PRIMARY KEY,
+    total_eval      REAL,
+    total_cost      REAL,
+    annual_dividend REAL,
+    annual_dividend_after_tax REAL,
+    holdings_count  INTEGER,
+    yoc             REAL
+);
+
+CREATE TABLE IF NOT EXISTS holding_review (
+    account     TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    decision    TEXT,
+    decided_at  TEXT,
+    note        TEXT,
+    PRIMARY KEY (account, ticker)
+);
+"""
+
+
+class _TursoRow(tuple):
+    """sqlite3.Row 互換。列名でも位置でも引ける。"""
+    def __new__(cls, cols, vals):
+        obj = super().__new__(cls, vals)
+        obj._cols = cols
+        return obj
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return tuple.__getitem__(self, self._cols.index(key))
+        return tuple.__getitem__(self, key)
+
+    def keys(self):
+        return self._cols
+
+
+class _TursoHttpCursor:
+    def __init__(self, cols, rows, lastrowid=None):
+        self.description = [(c, None, None, None, None, None, None) for c in cols] if cols else None
+        self._rows = rows
+        self._pos = 0
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchall(self):
+        rows = self._rows[self._pos:]
+        self._pos = len(self._rows)
+        return rows
+
+
+class _TursoHttpConn:
+    """Turso HTTP v2/pipeline API を sqlite3.Connection 互換に薄くラップ。
+
+    libsql-experimental（Rustコンパイル必須）に依存せず、標準ライブラリの
+    urllib だけで動く。stock-recommender の modules/trading_log.py と同じ手法。
+    """
+
+    def __init__(self, url: str, token: str):
+        self._base = url.replace("libsql://", "https://")
+        self._token = token
+
+    def _http_pipeline(self, requests: list) -> list:
+        payload = json.dumps({"requests": requests}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self._base}/v2/pipeline",
+            data=payload,
+            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())["results"]
+
+    @staticmethod
+    def _py_to_arg(v):
+        if v is None:
+            return {"type": "null", "value": None}
+        if isinstance(v, bool):
+            return {"type": "integer", "value": str(int(v))}
+        if isinstance(v, int):
+            return {"type": "integer", "value": str(v)}
+        if isinstance(v, float):
+            return {"type": "float", "value": v}
+        return {"type": "text", "value": str(v)}
+
+    @staticmethod
+    def _parse_result(result: dict) -> tuple[list, list]:
+        cols = [c["name"] for c in result.get("cols", [])]
+        rows = []
+        for raw_row in result.get("rows", []):
+            vals = []
+            for cell in raw_row:
+                t, v = cell.get("type"), cell.get("value")
+                if t == "null" or v is None:
+                    vals.append(None)
+                elif t == "integer":
+                    vals.append(int(v))
+                elif t in ("real", "float"):
+                    vals.append(float(v))
+                else:
+                    vals.append(v)
+            rows.append(_TursoRow(cols, vals))
+        return cols, rows
+
+    def execute(self, sql: str, params=()):
+        if not isinstance(params, (tuple, list)):
+            params = (params,)
+        args = [self._py_to_arg(p) for p in params]
+        stmt: dict = {"sql": sql}
+        if args:
+            stmt["args"] = args
+        results = self._http_pipeline([{"type": "execute", "stmt": stmt}, {"type": "close"}])
+        res = results[0]
+        if res.get("type") == "error":
+            raise Exception(res.get("error", {}).get("message", "Turso HTTP error"))
+        result = res["response"]["result"]
+        last_id = result.get("last_insert_rowid")
+        last_id = int(last_id) if last_id is not None else None
+        cols, rows = self._parse_result(result)
+        return _TursoHttpCursor(cols, rows, lastrowid=last_id)
+
+    def executemany(self, sql: str, seq_of_params):
+        seq = list(seq_of_params)
+        if not seq:
+            return _TursoHttpCursor([], [])
+        requests = []
+        for params in seq:
+            if not isinstance(params, (tuple, list)):
+                params = (params,)
+            args = [self._py_to_arg(p) for p in params]
+            stmt: dict = {"sql": sql}
+            if args:
+                stmt["args"] = args
+            requests.append({"type": "execute", "stmt": stmt})
+        requests.append({"type": "close"})
+        results = self._http_pipeline(requests)
+        for res in results:
+            if res.get("type") == "error":
+                raise Exception(res.get("error", {}).get("message", "Turso executemany error"))
+        return _TursoHttpCursor([], [])
+
+    def executescript(self, script: str):
+        stmts = [s.strip() for s in script.split(";") if s.strip()]
+        requests = [{"type": "execute", "stmt": {"sql": s}} for s in stmts]
+        requests.append({"type": "close"})
+        results = self._http_pipeline(requests)
+        for res in results:
+            if res.get("type") == "error":
+                msg = res.get("error", {}).get("message", "")
+                if "already exists" not in msg.lower():
+                    raise Exception(f"Turso executescript error: {msg}")
+
+    def commit(self):
+        pass  # HTTP API は自動コミット
+
+    def close(self):
+        pass
+
+
+def _table_names_in(sql: str) -> set[str]:
+    """雑な正規表現ではなく、SQLに単語として現れるテーブル名を拾う。"""
+    import re
+    words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sql))
+    return words
+
+
+class _DualConn:
+    """1本の DB 操作の裏で、SQL に含まれるテーブル名によって
+    ローカル SQLite と Turso クラウドのどちらか一方に自動で振り分ける。
+
+    CLOUD_TABLES と発掘用テーブルを同じクエリで JOIN する箇所は無い
+    （store.py 定義時点で確認済み）ので、SQL 単位の振り分けで安全に成立する。
+    """
+
+    def __init__(self, local_conn: sqlite3.Connection, cloud_conn: _TursoHttpConn):
+        self._local = local_conn
+        self._cloud = cloud_conn
+
+    def _route(self, sql: str):
+        names = _table_names_in(sql)
+        if names & CLOUD_TABLES:
+            return self._cloud
+        return self._local
+
+    def execute(self, sql: str, params=()):
+        return self._route(sql).execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params):
+        return self._route(sql).executemany(sql, seq_of_params)
+
+    def executescript(self, script: str):
+        self._local.executescript(script)
+        self._cloud.executescript(_DDL_CLOUD)
+
+    def commit(self):
+        self._local.commit()
+
+    def close(self):
+        self._local.close()
+
 
 @contextmanager
 def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(str(path or db_path()))
-    conn.row_factory = sqlite3.Row
+    turso_url = os.environ.get("TURSO_DATABASE_URL")
+    turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+    local_conn = sqlite3.connect(str(path or db_path()))
+    local_conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        local_conn.execute("PRAGMA journal_mode=WAL")
+        local_conn.execute("PRAGMA synchronous=NORMAL")
+        if turso_url and turso_token:
+            conn = _DualConn(local_conn, _TursoHttpConn(turso_url, turso_token))
+        else:
+            conn = local_conn
         yield conn
         conn.commit()
     finally:
-        conn.close()
+        local_conn.close()
 
 
 # 既存テーブルに後から足した列。CREATE TABLE IF NOT EXISTS は列を追加しないので、
@@ -306,8 +587,8 @@ def init_db(path: Path | None = None) -> None:
         for table, column, coltype in _MIGRATIONS:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-            except sqlite3.OperationalError:
-                pass   # 既にある
+            except Exception:
+                pass   # 既にある（ローカル/クラウドどちらでも列追加の重複はここで握りつぶす）
 
 
 def upsert_df(table: str, df: pd.DataFrame, columns: Iterable[str],
@@ -344,7 +625,10 @@ def upsert_df(table: str, df: pd.DataFrame, columns: Iterable[str],
 
 def read_df(sql: str, params: tuple = (), path: Path | None = None) -> pd.DataFrame:
     with connect(path) as conn:
-        return pd.read_sql_query(sql, conn, params=params)
+        cur = conn.execute(sql, params)
+        cols = [d[0] for d in cur.description] if cur.description else []
+        rows = [tuple(r) for r in cur.fetchall()]
+        return pd.DataFrame(rows, columns=cols)
 
 
 def latest_scores(path: Path | None = None) -> pd.DataFrame:

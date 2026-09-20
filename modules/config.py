@@ -64,7 +64,7 @@ def bridge_secrets_to_env() -> None:
         import streamlit as st
     except ImportError:
         return
-    for key in ("EDINET_API_KEY", "NTFY_TOPIC"):
+    for key in ("EDINET_API_KEY", "NTFY_TOPIC", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"):
         if key not in os.environ:
             try:
                 if key in st.secrets:
