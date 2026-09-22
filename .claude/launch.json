@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/bin/streamlit",
       "runtimeArgs": ["run", "app.py", "--server.port", "8502", "--server.headless", "true"],
       "port": 8502
+    },
+    {
+      "name": "dividend-scout-確認用",
+      "runtimeExecutable": ".venv/bin/streamlit",
+      "runtimeArgs": ["run", "app.py", "--server.port", "8599", "--server.headless", "true"],
+      "port": 8599
     }
   ]
 }

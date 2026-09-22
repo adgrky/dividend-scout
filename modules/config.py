@@ -46,7 +46,9 @@ def db_path(config: dict | None = None) -> Path:
 
 def legacy_dir(config: dict | None = None) -> Path:
     config = config or load_config()
-    return (APP_DIR / config["paths"]["legacy_dir"]).resolve()
+    raw = Path(config["paths"]["legacy_dir"]).expanduser()
+    # 絶対パスならそのまま。相対パスだけアプリの場所からたどる。
+    return raw.resolve() if raw.is_absolute() else (APP_DIR / raw).resolve()
 
 
 def bridge_secrets_to_env() -> None:

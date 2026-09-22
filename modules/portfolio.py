@@ -118,10 +118,11 @@ def record_equity(pos: pd.DataFrame, config: dict) -> None:
         "annual_dividend_after_tax": float(pos["annual_dividend_after_tax"].sum()),
         "holdings_count": int(len(pos)),
         "yoc": (div / cost) if cost else None,
+        "source": "snapshot",
     }
     upsert_df("equity_history", pd.DataFrame([row]),
               ["date", "total_eval", "total_cost", "annual_dividend",
-               "annual_dividend_after_tax", "holdings_count", "yoc"])
+               "annual_dividend_after_tax", "holdings_count", "yoc", "source"])
 
 
 def dividends_received(config: dict) -> pd.DataFrame:
@@ -280,3 +281,143 @@ def freed_cash(days: int = 30) -> dict:
         "売却件数": int(sells.sum()),
         "買い付け件数": int((~sells).sum()),
     }
+
+
+def dividend_staircase(pos: pd.DataFrame, config: dict, years: int = 10) -> pd.DataFrame:
+    """いまの保有数のまま過去も持っていたら、年ごとに配当をいくら受け取っていたか。
+
+    増配投資の成果は「この階段が右肩上がりか」に出る。評価額と違って、
+    市場ではなく企業の増配と自分の買い増しだけが動かす数字。
+
+    **株数はいまの値を使う。** 過去の各年に何株持っていたかは残っていないので、
+    これは実際の受取額ではなく「いまの持ち株が過去どう育ってきたか」を見る図。
+    買い増した銘柄ほど過去が大きく出るので、増配率そのものではない。
+    """
+    if pos is None or pos.empty:
+        return pd.DataFrame()
+
+    tickers = sorted(set(pos["ticker"]))
+    ph = ",".join("?" * len(tickers))
+    div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({ph})",
+                  tuple(tickers))
+    if div.empty:
+        return pd.DataFrame()
+
+    div["date"] = pd.to_datetime(div["date"])
+    div["年"] = div["date"].dt.year
+
+    rate_s = config["portfolio"]["tax_rate_specific"]
+    rate_n = config["portfolio"]["tax_rate_nisa"]
+
+    # 同じ銘柄を特定とNISAの両方で持っていることがあるので、口座ごとに積む
+    shares = (pos.groupby(["ticker", "account"])["shares"].sum()
+              .reset_index())
+    merged = div.merge(shares, on="ticker", how="inner")
+    merged["受取"] = merged["amount"] * merged["shares"]
+    merged["手取り"] = merged["受取"] * np.where(
+        merged["account"] == "nisa", 1 - rate_n, 1 - rate_s)
+
+    this_year = pd.Timestamp.today().year
+    # 今年はまだ権利落ちが済んでいない分があり、必ず低く出る。途中の年を
+    # 右端に置くと「減配した」ように見えるので、確定した年までで切る。
+    merged = merged[(merged["年"] >= this_year - years) & (merged["年"] < this_year)]
+    if merged.empty:
+        return pd.DataFrame()
+
+    out = merged.pivot_table(index="年", columns="account", values="手取り",
+                             aggfunc="sum").fillna(0.0)
+    out = out.rename(columns={"specific": "特定（税引後）", "nisa": "NISA（非課税）"})
+    for col in ("特定（税引後）", "NISA（非課税）"):
+        if col not in out.columns:
+            out[col] = 0.0
+    out["合計"] = out["特定（税引後）"] + out["NISA（非課税）"]
+    out["前年比"] = out["合計"].pct_change()
+    return out.reset_index()
+
+
+def portfolio_vs_benchmark(pos: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
+    """自分の持ち株と「指数をただ買っていた場合」を、同じ起点から並べる。
+
+    対照を置かずに自分の成績だけ見ると、相場が上がっただけの期間を実力だと
+    取り違える。差がマイナスなら、選ぶ手間をかけて指数に負けていたということ。
+
+    両方とも**配当を受け取って持ち続けた**前提で揃える。ETF側は分配金を
+    再投資した値（auto_adjust）なので、こちらも受け取った配当を足さないと、
+    配当を出している分だけ自分が一方的に低く出る。
+
+    どちらも投資家の税金は引いていない。NISAと特定で税率が違い、ETF側も
+    投資家の税は反映されていないので、引くと比較の前提が崩れる。
+
+    株数はいまの値を使う。推移そのものが「いまの保有をずっと持っていたら」で
+    できているので、配当も同じ前提で積む。
+    """
+    if pos is None or pos.empty or not symbols:
+        return pd.DataFrame()
+
+    eq = read_df("SELECT date, total_eval FROM equity_history ORDER BY date")
+    if eq.empty or len(eq) < 2:
+        return pd.DataFrame()
+    eq["date"] = pd.to_datetime(eq["date"])
+
+    start, end = eq["date"].min(), eq["date"].max()
+
+    # 期間中の権利落ちぶんを、いまの株数で積み上げる
+    tickers = sorted(set(pos["ticker"]))
+    ph = ",".join("?" * len(tickers))
+    div = read_df(f"SELECT ticker, date, amount FROM dividends WHERE ticker IN ({ph})",
+                  tuple(tickers))
+    cum = pd.Series(0.0, index=eq["date"])
+    if not div.empty:
+        div["date"] = pd.to_datetime(div["date"])
+        div = div[(div["date"] > start) & (div["date"] <= end)]
+        if not div.empty:
+            shares = pos.groupby("ticker")["shares"].sum()
+            div["受取"] = div["amount"] * div["ticker"].map(shares).fillna(0)
+            daily = div.groupby("date")["受取"].sum()
+            cum = daily.reindex(eq["date"].tolist() + daily.index.tolist()) \
+                       .groupby(level=0).sum().sort_index().fillna(0).cumsum() \
+                       .reindex(eq["date"], method="ffill").fillna(0)
+
+    # 売買でお金が出入りした日は、その分を差し引いてから増減を測る。
+    # 引かないと、売った日は評価額が減るので「損した」ように見える
+    # （実測: 6245を売った日に -1.8pt の段差が出た）。
+    flow = pd.Series(0.0, index=eq["date"])
+    tx = read_df("SELECT date, type, shares, price FROM transactions "
+                 "WHERE type IN ('buy','sell')")
+    if not tx.empty:
+        tx["date"] = pd.to_datetime(tx["date"])
+        tx["額"] = tx["shares"] * tx["price"] * tx["type"].map({"buy": 1.0, "sell": -1.0})
+        # 引き継いだ推計の期間は「いまの保有をずっと持っていた」前提で作られていて、
+        # 売買はもともと織り込まれていない。ここに売買を足すと二重に効く。
+        first_real = read_df("SELECT MIN(date) AS d FROM equity_history "
+                             "WHERE source IS NULL OR source <> 'backfill'")["d"].iloc[0]
+        if first_real:
+            tx = tx[tx["date"] >= pd.to_datetime(first_real)]
+        if not tx.empty:
+            per_day = tx.groupby("date")["額"].sum()
+            flow = per_day.reindex(eq["date"]).fillna(0.0)
+
+    value = pd.Series(eq["total_eval"].values + cum.values, index=eq["date"])
+    # 日ごとの増減率を出してからつなぐ（時間加重）。出入りのあった日だけが補正される。
+    prev = value.shift(1)
+    ret = ((value - prev - flow) / prev).fillna(0.0)
+    ret.iloc[0] = 0.0
+    out = pd.DataFrame({
+        "date": eq["date"],
+        "自分の持ち株": (1.0 + ret).cumprod().values * 100.0,
+    })
+
+    ph2 = ",".join("?" * len(symbols))
+    bm = read_df(f"SELECT symbol, date, close FROM benchmarks WHERE symbol IN ({ph2}) "
+                 "ORDER BY date", tuple(symbols))
+    if bm.empty:
+        return out
+    bm["date"] = pd.to_datetime(bm["date"])
+    for symbol, g in bm.groupby("symbol"):
+        s = g.set_index("date")["close"].sort_index()
+        # 休場日は直前の終値を使う。起点は推移の初日に合わせる。
+        aligned = s.reindex(s.index.union(out["date"])).ffill().reindex(out["date"])
+        if aligned.isna().all() or pd.isna(aligned.iloc[0]):
+            continue
+        out[symbol] = (aligned / aligned.iloc[0] * 100.0).values
+    return out

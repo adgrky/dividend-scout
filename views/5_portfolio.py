@@ -9,8 +9,9 @@ from datetime import date
 
 from modules.format import pct, to_pct, yen, yen_short
 from modules import income_risk as IR
-from modules.portfolio import (dividend_calendar, dividends_received,
-                               expected_dividends, record_equity, sector_exposure)
+from modules.portfolio import (dividend_calendar, dividend_staircase, dividends_received,
+                               expected_dividends, portfolio_vs_benchmark, record_equity,
+                               sector_exposure)
 from modules.store import connect, read_df
 from modules.ui import flash, show_flash, get_config, get_next_ex_dates, get_positions
 
@@ -51,9 +52,9 @@ st.caption(f"保有 {len(positions)} 銘柄 ／ 1銘柄あたり平均 {yen_shor
 # インカム投資の目的は「配当が育つこと」なので、推移が見えないと成果が分からない。
 record_equity(positions, config)
 
-tab1, tab7, tab8, tab2, tab3, tab6, tab4, tab5 = st.tabs(
-    ["保有一覧", "配当の強さ", "NISA枠", "業種の配分", "配当月", "次の権利落ち日",
-     "配当の受取記録", "推移"])
+tab1, tab7, tab9, tab8, tab2, tab3, tab6, tab4, tab5, tab10 = st.tabs(
+    ["保有一覧", "配当の強さ", "増配の実績", "NISA枠", "業種の配分", "配当月",
+     "次の権利落ち日", "配当の受取記録", "推移", "ほっといた場合との差"])
 
 with tab1:
     edit_mode = st.toggle("株数と取得単価を直す", value=False,
@@ -733,50 +734,94 @@ with tab5:
     if hist.empty:
         st.info("まだ記録がありません。次にこの画面を開いたときから貯まります。")
     else:
-        first, last = hist.iloc[0], hist.iloc[-1]
-        days = len(hist)
+        # 前のアプリから引き継いだ期間は「その日に記録した値」ではなく、
+        # 『今の保有のまま過去も持っていたら』を過去株価から計算し直した推計。
+        # 実測と同じ線で描くと、分からないはずの過去が分かっているように見える。
+        if "source" not in hist.columns:
+            hist["source"] = "snapshot"
+        hist["source"] = hist["source"].fillna("snapshot")
+        est = hist[hist["source"] == "backfill"]
+        real = hist[hist["source"] != "backfill"]
+
+        if not est.empty:
+            st.info(
+                f"**{est['date'].min()}〜{est['date'].max()} の {len(est)} 日ぶんは推計です。** "
+                "前に使っていた持株管理アプリから引き継いだもので、当時の保有数が"
+                "残っていないため『**今の保有のまま過去も持っていたら**評価額はいくらだったか』"
+                "を過去の株価から計算し直した値です。"
+                + (f"実際にその日に記録した値は {real['date'].min()} からの {len(real)} 日ぶん。"
+                   if not real.empty else "実測はまだ1日もありません。"),
+                icon="📎")
+
+        # 増減は実測どうしでしか測らない。推計期間の年間配当は今の値を全日に
+        # 流用しただけなので、そこを起点に引くと増えていない配当が増えて見える。
+        movable = len(real) >= 2
+        base = real if movable else hist
+        first, last = base.iloc[0], base.iloc[-1]
+
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("記録した日数", f"{days} 日",
-                  help=f"{first['date']} から {last['date']} まで")
-        d_div = last["annual_dividend"] - first["annual_dividend"]
-        c2.metric("年間配当（税引前）", yen(last["annual_dividend"]),
-                  yen(d_div) if days > 1 else None,
-                  help="いまの保有株数 × 直近の1株配当。増配と買い増しで増えます")
-        c3.metric("年間配当（税引後）", yen(last["annual_dividend_after_tax"]),
+        c1.metric("記録した日数", f"{len(real)} 日",
+                  help=(f"実測のみ。{real['date'].min()} から {real['date'].max()} まで"
+                        if not real.empty else "実測はまだありません")
+                       + (f"（ほかに推計 {len(est)} 日ぶん）" if not est.empty else ""))
+        c2.metric("年間配当（税引前）", yen(hist.iloc[-1]["annual_dividend"]),
+                  yen(last["annual_dividend"] - first["annual_dividend"]) if movable else None,
+                  help="いまの保有株数 × 直近の1株配当。増配と買い増しで増えます。"
+                       "増減は実測を始めてからの変化です")
+        c3.metric("年間配当（税引後）", yen(hist.iloc[-1]["annual_dividend_after_tax"]),
                   yen(last["annual_dividend_after_tax"] - first["annual_dividend_after_tax"])
-                  if days > 1 else None)
-        c4.metric("YOC", pct(last["yoc"], 2) if pd.notna(last["yoc"]) else "—",
-                  f"{(last['yoc'] - first['yoc']) * 100:+.2f}pt" if days > 1
-                  and pd.notna(first["yoc"]) else None,
+                  if movable else None)
+        c4.metric("YOC", pct(hist.iloc[-1]["yoc"], 2)
+                  if pd.notna(hist.iloc[-1]["yoc"]) else "—",
+                  f"{(last['yoc'] - first['yoc']) * 100:+.2f}pt"
+                  if movable and pd.notna(first["yoc"]) else None,
                   help="いまの年間配当 ÷ 買ったときの金額。増配で育つとここが上がります")
 
-        if days < 2:
+        if len(hist) < 2:
             st.info("グラフは2日ぶん貯まってから出ます。いまは1日ぶんしかありません。")
         else:
             c1, c2 = st.columns(2)
             with c1:
+                # 評価額は推計にも意味がある。「今の持ち株がこの半年どう動いたか」は
+                # 過去株価から正しく再現できるので、薄い線で続きとして見せる。
                 fig = go.Figure()
-                fig.add_scatter(x=hist["date"], y=hist["total_eval"], name="評価額",
+                if not est.empty:
+                    fig.add_scatter(x=est["date"], y=est["total_eval"], name="評価額（推計）",
+                                    line=dict(color="#4C8BF5", width=1.5, dash="dot"),
+                                    opacity=0.55)
+                fig.add_scatter(x=real["date"], y=real["total_eval"], name="評価額（実測）",
                                 line=dict(color="#4C8BF5"))
                 fig.add_scatter(x=hist["date"], y=hist["total_cost"], name="取得額",
                                 line=dict(color="#999", dash="dot"))
+                if not est.empty and not real.empty:
+                    fig.add_vline(x=real["date"].min(), line_width=1,
+                                  line_dash="dash", line_color="#888",
+                                  annotation_text="ここから実測",
+                                  annotation_position="top left")
                 fig.update_layout(height=300, yaxis_title="円", title="評価額と取得額",
                                   margin=dict(l=10, r=10, t=40, b=10))
                 st.plotly_chart(fig, width="stretch")
             with c2:
+                # 年間配当は推計を描かない。引き継いだ期間の配当は今の値を全日に
+                # 流用しただけで、過去について何も語っていない。横ばいの線を引くと
+                # 「その間ずっと配当は動かなかった」という嘘になる。
                 fig = go.Figure()
-                fig.add_scatter(x=hist["date"], y=hist["annual_dividend"],
+                fig.add_scatter(x=real["date"], y=real["annual_dividend"],
                                 name="税引前", line=dict(color="#E45756"))
-                fig.add_scatter(x=hist["date"], y=hist["annual_dividend_after_tax"],
+                fig.add_scatter(x=real["date"], y=real["annual_dividend_after_tax"],
                                 name="税引後", line=dict(color="#E45756", dash="dot"))
                 fig.update_layout(height=300, yaxis_title="円",
-                                  title="年間配当（こちらが本番）",
+                                  title="年間配当（こちらが本番／実測のみ）",
                                   margin=dict(l=10, r=10, t=40, b=10))
                 st.plotly_chart(fig, width="stretch")
+                if len(real) < 2:
+                    st.caption("実測が2日ぶん貯まるとここに線が出ます。"
+                               "引き継いだ期間の配当は推計なので描いていません。")
 
         # 生の列名のまま出すと何の数字か分からないので、必ず日本語に直して単位をつける
         show = pd.DataFrame({
             "日付": hist["date"],
+            "種別": hist["source"].map({"backfill": "推計", "snapshot": "実測"}),
             "評価額": hist["total_eval"].round(0),
             "取得額": hist["total_cost"].round(0),
             "損益": (hist["total_eval"] - hist["total_cost"]).round(0),
@@ -786,6 +831,8 @@ with tab5:
             "YOC": to_pct(hist["yoc"]).round(2),
         }).iloc[::-1]
         st.dataframe(show, hide_index=True, width="stretch", height=280, column_config={
+            "種別": st.column_config.TextColumn(
+                help="実測＝その日に記録した値／推計＝今の保有を過去株価に当てはめた値"),
             "評価額": st.column_config.NumberColumn(format="¥%d"),
             "取得額": st.column_config.NumberColumn(format="¥%d"),
             "損益": st.column_config.NumberColumn(format="¥%d"),
@@ -795,3 +842,241 @@ with tab5:
             "YOC": st.column_config.NumberColumn(
                 format="%.2f%%", help="いまの年間配当 ÷ 買ったときの金額"),
         })
+
+
+with tab9:
+    st.caption("**増配で配当が育っているか**を見る。評価額は市場が決めるが、"
+               "ここは企業の増配と自分の買い増しだけが動かす。")
+
+    an = positions.copy()
+    for col in ("streak", "streak_no_cut", "cuts_10y"):
+        if col not in an.columns:
+            an[col] = pd.NA
+    an["streak"] = pd.to_numeric(an["streak"], errors="coerce").fillna(0)
+
+    # 配当性向はスコアの内訳に入っている（画面をまたいで同じ値を使う）
+    def _raw_payout(js):
+        if not isinstance(js, str):
+            return None
+        try:
+            import json
+            return json.loads(js).get("raw", {}).get("payout_ratio")
+        except Exception:
+            return None
+
+    an["payout_ratio"] = pd.to_numeric(
+        an["detail_json"].map(_raw_payout), errors="coerce")
+
+    # 平均は銘柄数ではなく**年間配当で重みづけ**する。1株だけ持っている銘柄と
+    # 1,100株持っている銘柄を同じ1票にすると、実際に受け取る配当の姿とずれる。
+    w = an["annual_dividend"].fillna(0)
+    wsum = float(w.sum())
+
+    def _wavg(col: pd.Series) -> float | None:
+        m = col.notna() & (w > 0)
+        return float((col[m] * w[m]).sum() / w[m].sum()) if m.any() and w[m].sum() else None
+
+    avg_streak = _wavg(an["streak"])
+    n_10plus = int((an["streak"] >= 10).sum())
+    avg_payout = _wavg(an["payout_ratio"])
+    n_high = int((an["payout_ratio"] > 0.8).sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("連続増配年数（配当で加重）", f"{avg_streak:.1f} 年" if avg_streak else "—",
+              help="銘柄数ではなく、受け取る配当の大きさで重みをつけた平均")
+    c2.metric("10年以上の連続増配", f"{n_10plus} 銘柄",
+              help=f"保有 {len(an)} 銘柄のうち")
+    c3.metric("配当性向（配当で加重）", pct(avg_payout) if avg_payout else "—",
+              help="配当 ÷ 純利益。30〜50%が健全。低すぎるのも還元する気が薄い")
+    c4.metric("配当性向 80%超", f"{n_high} 銘柄",
+              help="利益のほとんどを配当に回している状態。減益が来ると減配しやすい")
+
+    st.divider()
+
+    st.markdown("##### 連続増配年数 ベスト15")
+    st.caption("⚠️ **この年数は「これから増配する」という意味ではありません。** "
+               "🧪検証で調べたところ、連続増配年数は将来のリターンを説明しませんでした。"
+               "増配を続けてきた実績の記録として見てください。"
+               "据え置きの年があると止まりますが、記念配当の年は飛ばして数えています。")
+    top = an[an["streak"] > 0].nlargest(15, "streak")
+    if top.empty:
+        st.info("連続増配中の保有はありません。")
+    else:
+        show = pd.DataFrame({
+            "コード": top["code"],
+            "銘柄名": top["name"],
+            "口座": top["account"].map({"specific": "特定", "nisa": "NISA"}),
+            "連続増配": top["streak"].astype(int),
+            "減配なし": pd.to_numeric(top["streak_no_cut"], errors="coerce"),
+            "年間配当": top["annual_dividend"].round(0),
+            "YOC": to_pct(top["yoc"]).round(2),
+            "配当性向": to_pct(top["payout_ratio"]).round(1),
+        })
+        st.dataframe(show, hide_index=True, width="stretch", column_config={
+            "連続増配": st.column_config.NumberColumn(format="%d 年"),
+            "減配なし": st.column_config.NumberColumn(format="%d 年"),
+            "年間配当": st.column_config.NumberColumn(format="¥%d"),
+            "YOC": st.column_config.NumberColumn(format="%.2f%%"),
+            "配当性向": st.column_config.NumberColumn(format="%.1f%%"),
+        })
+
+    st.divider()
+
+    st.markdown("##### 配当性向が高い保有 — 減配が起きるとしたらここ")
+    st.caption("配当性向は **配当 ÷ 純利益**。70%を超えると利益の変動をそのまま配当が受ける。"
+               "100%を超えていれば、利益を超えて配当を出している状態。"
+               "ここに出ること自体は売る理由になりません（売りは"
+               "**実際に減配が起きてから**）。買い増しを止める材料として見てください。")
+    risky = an[an["payout_ratio"] > 0.7].nlargest(15, "payout_ratio")
+    if risky.empty:
+        st.success("配当性向が70%を超える保有はありません。")
+    else:
+        show = pd.DataFrame({
+            "コード": risky["code"],
+            "銘柄名": risky["name"],
+            "口座": risky["account"].map({"specific": "特定", "nisa": "NISA"}),
+            "配当性向": to_pct(risky["payout_ratio"]).round(1),
+            "連続増配": risky["streak"].astype(int),
+            "10年の減配回数": pd.to_numeric(risky["cuts_10y"], errors="coerce"),
+            "年間配当": risky["annual_dividend"].round(0),
+            "配当継続スコア": pd.to_numeric(risky["health"], errors="coerce").round(1),
+        })
+        st.dataframe(show, hide_index=True, width="stretch", column_config={
+            "配当性向": st.column_config.NumberColumn(format="%.1f%%"),
+            "連続増配": st.column_config.NumberColumn(format="%d 年"),
+            "10年の減配回数": st.column_config.NumberColumn(format="%d 回"),
+            "年間配当": st.column_config.NumberColumn(format="¥%d"),
+            "配当継続スコア": st.column_config.NumberColumn(
+                format="%.1f", help="市場の評価を入れず、配当が続くか・増えるかだけを見たスコア"),
+        })
+        n_over100 = int((risky["payout_ratio"] > 1.0).sum())
+        if n_over100:
+            st.warning(f"うち {n_over100} 銘柄は配当性向が100%を超えています。"
+                       "利益を超えて配当を出している状態なので、🚨監視の減配シグナルを確認してください。")
+
+    st.divider()
+
+    st.markdown("##### 年間の受取配当 — 階段が上がっているか")
+    stair = dividend_staircase(positions, config)
+    if stair.empty:
+        st.info("配当履歴がまだありません。更新.command を実行すると貯まります。")
+    else:
+        st.caption("**いまの保有数のまま過去も持っていたら**、年ごとにいくら受け取っていたか。"
+                   "実際の受取額ではありません（当時の株数は残っていないため）。"
+                   "買い増した銘柄ほど過去が大きく出るので、"
+                   "**増配率そのものではなく、いまの持ち株が育ってきた形**として見てください。"
+                   f"今年（{pd.Timestamp.today().year}年）はまだ権利落ちが済んでいない分があるので入れていません。")
+
+        fig = go.Figure()
+        fig.add_bar(x=stair["年"], y=stair["特定（税引後）"], name="特定（税引後）",
+                    marker_color="#4C8BF5")
+        fig.add_bar(x=stair["年"], y=stair["NISA（非課税）"], name="NISA（非課税）",
+                    marker_color="#54A24B")
+        fig.update_layout(barmode="stack", height=320, yaxis_title="円",
+                          xaxis=dict(dtick=1),
+                          margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+        n_years = len(stair)
+        if n_years >= 2:
+            first_y, last_y = stair.iloc[0], stair.iloc[-1]
+            cagr = ((last_y["合計"] / first_y["合計"]) ** (1 / (n_years - 1)) - 1
+                    if first_y["合計"] > 0 else None)
+            up = int((stair["前年比"] > 0).sum())
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"{int(first_y['年'])}年 → {int(last_y['年'])}年",
+                      yen(last_y["合計"]), yen(last_y["合計"] - first_y["合計"]))
+            c2.metric("年率", pct(cagr) if cagr is not None else "—",
+                      help="この期間の伸びを1年あたりに直したもの")
+            c3.metric("前年より増えた年", f"{up} / {n_years - 1} 年")
+
+        show = stair.copy()
+        show["年"] = show["年"].astype(int).astype(str) + "年"
+        show["前年比"] = to_pct(show["前年比"]).round(1)
+        st.dataframe(show.iloc[::-1], hide_index=True, width="stretch", height=260,
+                     column_config={
+                         "特定（税引後）": st.column_config.NumberColumn(format="¥%d"),
+                         "NISA（非課税）": st.column_config.NumberColumn(format="¥%d"),
+                         "合計": st.column_config.NumberColumn(format="¥%d"),
+                         "前年比": st.column_config.NumberColumn(format="%.1f%%"),
+                     })
+
+
+with tab10:
+    st.caption("**自分で選んだ結果が、指数をただ買って放っておいた場合より良かったのか。** "
+               "対照を置かずに自分の成績だけ見ると、相場が上がっただけの期間を"
+               "実力だと取り違えます。")
+
+    BM_LABELS = {
+        "1306.T": "TOPIX（ETF）",
+        "1577.T": "日本高配当株70（ETF）",
+        "1489.T": "日経高配当株50（ETF）",
+    }
+    have = read_df("SELECT symbol, COUNT(*) AS n, MIN(date) AS a, MAX(date) AS b "
+                   "FROM benchmarks GROUP BY symbol")
+    if have.empty:
+        st.info("比較するデータがまだありません。\n\n"
+                "```bash\nuv run python scripts/fetch_benchmarks.py\n```")
+    else:
+        picked = st.multiselect(
+            "比べる相手", list(BM_LABELS.keys()),
+            default=[s for s in ("1306.T", "1577.T") if s in set(have["symbol"])],
+            format_func=lambda s: BM_LABELS.get(s, s))
+        cmp_df = portfolio_vs_benchmark(positions, picked)
+
+        if cmp_df.empty or len(cmp_df) < 2:
+            st.info("推移が2日ぶん貯まると比べられます。")
+        else:
+            first_d, last_d = cmp_df["date"].iloc[0], cmp_df["date"].iloc[-1]
+            st.caption(f"{first_d:%Y-%m-%d} を100として、{last_d:%Y-%m-%d} まで。"
+                       "どちらも**配当・分配金を受け取って持ち続けた**前提です"
+                       "（片方だけ配当を抜くと、配当を出している側が一方的に低く出ます）。"
+                       "税金はどちらも引いていません。"
+                       "売買でお金が出入りした日は、その分を差し引いてから増減を測っています。")
+
+            fig = go.Figure()
+            fig.add_scatter(x=cmp_df["date"], y=cmp_df["自分の持ち株"],
+                            name="自分の持ち株", line=dict(color="#E45756", width=2.5))
+            palette = ["#4C8BF5", "#54A24B", "#B279A2"]
+            for i, s in enumerate([c for c in cmp_df.columns
+                                   if c not in ("date", "自分の持ち株")]):
+                fig.add_scatter(x=cmp_df["date"], y=cmp_df[s], name=BM_LABELS.get(s, s),
+                                line=dict(color=palette[i % len(palette)],
+                                          width=1.5, dash="dot"))
+            fig.add_hline(y=100, line_width=1, line_color="#bbb")
+            fig.update_layout(height=360, yaxis_title="起点=100",
+                              margin=dict(l=10, r=10, t=20, b=10),
+                              legend=dict(orientation="h", yanchor="bottom", y=1.0))
+            st.plotly_chart(fig, width="stretch")
+
+            last = cmp_df.iloc[-1]
+            mine = last["自分の持ち株"] - 100.0
+            cols = st.columns(1 + len([c for c in cmp_df.columns
+                                       if c not in ("date", "自分の持ち株")]))
+            cols[0].metric("自分の持ち株", f"{mine:+.1f}%")
+            for i, s in enumerate([c for c in cmp_df.columns
+                                   if c not in ("date", "自分の持ち株")]):
+                theirs = last[s] - 100.0
+                cols[i + 1].metric(BM_LABELS.get(s, s), f"{theirs:+.1f}%",
+                                   f"{mine - theirs:+.1f}pt",
+                                   help="自分との差。マイナスなら、選ぶ手間をかけて"
+                                        "この指数に負けていたということ")
+
+            diffs = {s: mine - (last[s] - 100.0)
+                     for s in cmp_df.columns if s not in ("date", "自分の持ち株")}
+            if diffs and max(diffs.values()) < 0:
+                worst = min(diffs, key=diffs.get)
+                st.warning(
+                    f"**この期間は、選んだ結果が指数に負けています**"
+                    f"（{BM_LABELS.get(worst, worst)}に {abs(diffs[worst]):.1f}pt）。"
+                    "ただし判断はこの1回では決まりません。期間が短いほど差は運で動きます。"
+                    "同じ差が期間を変えても続くようなら、銘柄を選ぶこと自体を見直す材料になります。",
+                    icon="⚠️")
+            elif diffs and min(diffs.values()) > 0:
+                st.success(
+                    "この期間は、選んだ結果がどの指数も上回っています。"
+                    "期間が短いうちは運の割合が大きいので、続くかどうかを見てください。",
+                    icon="✅")
+
+            st.caption(f"※ 比較できるのは推移が貯まっている {len(cmp_df)} 日ぶんだけです。"
+                       "期間を伸ばすには推移を貯め続ける必要があります。")

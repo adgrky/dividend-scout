@@ -296,4 +296,7 @@ portfolio:
 
 paths:
   db: "data/scout.db"
-  legacy_dir: "../portfolio-manager/data"
+  # 引き継ぎ元（参照専用で凍結済み）。手で動かす取り込みスクリプトからしか読まない。
+  # 自動更新からは触らないこと。デスクトップ配下は macOS がバックグラウンドの
+  # プログラムから隔離するので、定期実行から読ませると黙って失敗する。
+  legacy_dir: "~/Desktop/クロード/portfolio-manager/data"

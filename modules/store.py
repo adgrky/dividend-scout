@@ -50,7 +50,7 @@ CLOUD_TABLES = {
     "holdings", "transactions", "watchlist", "alerts",
     "settings", "holding_review", "equity_history",
     "universe", "quotes", "dividends", "scores",
-    "fundamentals", "market_history",
+    "fundamentals", "market_history", "benchmarks",
 }
 
 _DDL = """
@@ -249,7 +249,8 @@ CREATE TABLE IF NOT EXISTS equity_history (   -- 資産と配当の推移（日�
     annual_dividend REAL,
     annual_dividend_after_tax REAL,
     holdings_count  INTEGER,
-    yoc             REAL
+    yoc             REAL,
+    source          TEXT            -- snapshot（その日に記録）/ backfill（過去株価からの推計）
 );
 
 CREATE TABLE IF NOT EXISTS market_history (   -- 相場の水準（自前で貯める）
@@ -259,6 +260,13 @@ CREATE TABLE IF NOT EXISTS market_history (   -- 相場の水準（自前で貯�
     pbr_index       REAL,
     pct_10y         REAL,
     vs_ma200        REAL
+);
+
+CREATE TABLE IF NOT EXISTS benchmarks (   -- 「ほっといた場合」の比較対象
+    symbol  TEXT NOT NULL,                -- 1306.T（TOPIX連動ETF）等
+    date    TEXT NOT NULL,
+    close   REAL,                         -- 分配金を再投資した後の値
+    PRIMARY KEY (symbol, date)
 );
 
 CREATE TABLE IF NOT EXISTS holding_review (   -- 整理の判断を覚えておく
@@ -356,6 +364,13 @@ CREATE TABLE IF NOT EXISTS market_history (
     vs_ma200        REAL
 );
 
+CREATE TABLE IF NOT EXISTS benchmarks (
+    symbol  TEXT NOT NULL,
+    date    TEXT NOT NULL,
+    close   REAL,
+    PRIMARY KEY (symbol, date)
+);
+
 CREATE TABLE IF NOT EXISTS holdings (
     account     TEXT NOT NULL,
     ticker      TEXT NOT NULL,
@@ -418,7 +433,8 @@ CREATE TABLE IF NOT EXISTS equity_history (
     annual_dividend REAL,
     annual_dividend_after_tax REAL,
     holdings_count  INTEGER,
-    yoc             REAL
+    yoc             REAL,
+    source          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS holding_review (
@@ -653,6 +669,11 @@ _MIGRATIONS = [
     # 売ったときの税額。整理で生まれた「手取り」を正確に積み上げて、
     # そのお金をそのまま次の買い付けに回せるようにする。
     ("transactions", "tax", "REAL"),
+    # 推移の1行が「実際に記録した日」か「過去株価から計算し直した推計」かを分ける。
+    # portfolio-manager から引き継いだ2〜6月ぶんは、当時の保有数が残っていないので
+    # 『今の保有のまま過去も持っていたら』という前提で計算されている。実測値と混ぜて
+    # 1本の線にすると、増えていない配当が増えたように見えるので必ず区別する。
+    ("equity_history", "source", "TEXT"),
 ]
 
 
