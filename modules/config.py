@@ -51,25 +51,39 @@ def legacy_dir(config: dict | None = None) -> Path:
     return raw.resolve() if raw.is_absolute() else (APP_DIR / raw).resolve()
 
 
-def bridge_secrets_to_env() -> None:
-    """Streamlit の secrets を os.environ に流し込む。
+_SECRET_KEYS = ("EDINET_API_KEY", "NTFY_TOPIC", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN")
 
-    これを噛ませることで、modules/ 以下は一切 Streamlit を import せずに済み、
-    GitHub Actions からも同じコードが動く。
-    secrets.toml が存在しない環境で st.secrets に触ると警告が出るため、
-    ファイルの存在を先に確認する。
+
+def bridge_secrets_to_env() -> None:
+    """secrets.toml の中身を os.environ に流し込む。
+
+    **これを通していないと、クラウド(Turso)ではなくパソコンのDBに書いてしまう。**
+    `store.connect()` は TURSO_DATABASE_URL が環境変数にあるかどうかだけで
+    書き込み先を決めるので、環境変数が無いスクリプトは黙ってローカルに書く。
+
+    実測（2026-09-23）: weekly_scan.py がこれを呼んでおらず、2026-09-20 に
+    クラウド同期を入れて以降、毎週のスキャン結果がアプリに一度も届いていなかった。
+    アプリ側のスコアは 2026-09-19 のまま止まり、配当データを直しても
+    画面の配当性向が変わらなかった。エラーは出ない。ただ古いまま見え続ける。
+
+    そのため **store.connect() から自動で呼ぶ**ようにしてある。スクリプト側の
+    呼び忘れで同じことが起きないようにするため。
+
+    読み取りは tomllib（標準ライブラリ）で直接行う。Streamlit 経由にすると
+    modules/ が Streamlit に依存してしまい、GitHub Actions から動かせなくなる。
     """
-    paths = [Path.home() / ".streamlit" / "secrets.toml", APP_DIR / ".streamlit" / "secrets.toml"]
-    if not any(p.exists() for p in paths):
+    if all(k in os.environ for k in _SECRET_KEYS):
         return
-    try:
-        import streamlit as st
-    except ImportError:
-        return
-    for key in ("EDINET_API_KEY", "NTFY_TOPIC", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"):
-        if key not in os.environ:
-            try:
-                if key in st.secrets:
-                    os.environ[key] = str(st.secrets[key])
-            except Exception:
-                pass
+    import tomllib
+    for path in (APP_DIR / ".streamlit" / "secrets.toml",
+                 Path.home() / ".streamlit" / "secrets.toml"):
+        if not path.exists():
+            continue
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            continue
+        for key in _SECRET_KEYS:
+            if key not in os.environ and isinstance(data.get(key), (str, int, float)):
+                os.environ[key] = str(data[key])

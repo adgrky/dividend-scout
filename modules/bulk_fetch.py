@@ -7,6 +7,15 @@
 auto_adjust=False でも Dividends 列と Close 列はどちらも株式分割調整済みで返る
 （NTT 9432 で検証: 2016年 1.2円/回 → 2025年 2.65円/回。100:1・2:1・2:1・25:1 の
 分割をまたいでも利回り DPS/Close が時系列で一貫する）。
+
+**ただし例外がひとつある。権利落ち日と分割日がぴったり同じ日の配当だけ、
+分割が当たらないまま返ってくる。** 調整されるのは「その配当より後に起きた分割」
+なので、同じ日の分割は「後」に入らないため。
+
+実測（2026-09-23）: 日本製鉄 5401 は 2025-09-29 に 5:1 の分割をしていて、同じ日の
+配当が 60円 のまま入っていた（前後の配当は 16円・12円）。年間配当が 24円 のところ
+72円 と3倍で積まれ、配当性向が 2193%（実際は数十%）になっていた。
+全市場では 149件・144銘柄が同じ状態だった。
 """
 from __future__ import annotations
 
@@ -113,6 +122,62 @@ def _events(ticker: str, df: pd.DataFrame, column: str, value_name: str) -> pd.D
     })
 
 
+def fix_same_day_split_dividends(div: pd.DataFrame, splits: pd.DataFrame
+                                 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """権利落ち日と分割日が同じ日の配当に、分割を当て直す。
+
+    yfinance が調整してくれるのは「その配当より**後**に起きた分割」だけなので、
+    同じ日の分割だけが漏れる（モジュール冒頭の説明を参照）。
+
+    直すのは、次の両方を満たすものだけ。
+      ・権利落ち日が分割日とぴったり同じ
+      ・前後2回ずつの配当と比べて、ちょうど分割の比率ぶん大きい
+
+    2つ目を必ず重ねる。同じ日に記念配当が乗っていた場合に、本物の増配を
+    分割のせいだと決めつけて割ってしまうのを防ぐため。基準を「全期間の中央値」に
+    すると、過去に何度も分割した銘柄（KDDIなど）で昔の配当が小さく調整されている
+    せいで誤検出する。実測で KDDI 2025-03-28 が誤って引っかかった。
+
+    返り値は (直した配当, 直した明細)。
+    """
+    empty = pd.DataFrame(columns=["ticker", "date", "amount", "ratio", "before", "after"])
+    if div is None or div.empty or splits is None or splits.empty:
+        return div, empty
+
+    sp = splits[splits["ratio"] > 1.2][["ticker", "date", "ratio"]]
+    if sp.empty:
+        return div, empty
+
+    out = div.copy()
+    key = out["ticker"].astype(str) + "|" + out["date"].astype(str)
+    sp_key = dict(zip(sp["ticker"].astype(str) + "|" + sp["date"].astype(str), sp["ratio"]))
+
+    changed = []
+    for ticker, g in out.groupby("ticker", sort=False):
+        g = g.sort_values("date")
+        idx = list(g.index)
+        if len(idx) < 4:
+            continue
+        for pos, i in enumerate(idx):
+            ratio = sp_key.get(f"{ticker}|{out.at[i, 'date']}")
+            if not ratio:
+                continue
+            nb = [out.at[j, "amount"] for j in idx[max(0, pos - 2):pos] + idx[pos + 1:pos + 3]]
+            if len(nb) < 2:
+                continue
+            base = float(pd.Series(nb).median())
+            v = float(out.at[i, "amount"])
+            if base <= 0 or v / base <= 1.5:
+                continue
+            if not (0.7 <= (v / ratio) / base <= 1.45):
+                continue
+            out.at[i, "amount"] = v / ratio
+            changed.append({"ticker": ticker, "date": out.at[i, "date"], "amount": v / ratio,
+                            "ratio": ratio, "before": v, "after": v / ratio})
+
+    return out, (pd.DataFrame(changed) if changed else empty)
+
+
 def download_batch(tickers: list[str], period: str = "max",
                    retries: int = 2) -> dict[str, pd.DataFrame]:
     """1バッチ分を一括ダウンロードして、銘柄ごとの日足に分解する。"""
@@ -212,10 +277,18 @@ def scan(tickers: Iterable[str], config: dict,
         parts = [p for p in parts if p is not None and not p.empty]
         return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=cols)
 
+    dividends = _concat(div_parts, ["ticker", "date", "amount"])
+    splits = _concat(split_parts, ["ticker", "date", "ratio"])
+    dividends, fixed = fix_same_day_split_dividends(dividends, splits)
+    if not fixed.empty:
+        print(f"  権利落ち日と分割日が重なって分割が漏れていた配当を直した: "
+              f"{len(fixed)} 件 / {fixed['ticker'].nunique()} 銘柄")
+
     return {
         "prices": _concat(weekly_parts, ["ticker", "date", "close", "volume"]),
-        "dividends": _concat(div_parts, ["ticker", "date", "amount"]),
-        "splits": _concat(split_parts, ["ticker", "date", "ratio"]),
+        "dividends": dividends,
+        "splits": splits,
         "quotes": pd.DataFrame(quotes),
         "broken": pd.DataFrame(broken),
+        "div_fixed": fixed,
     }

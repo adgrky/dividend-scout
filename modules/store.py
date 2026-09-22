@@ -634,8 +634,30 @@ class _DualConn:
         self._local.close()
 
 
+_bridged = False
+
+
+def _ensure_secrets() -> None:
+    """接続を作る直前に、必ず secrets を環境変数へ通す。
+
+    スクリプト側の呼び忘れで、クラウドではなくパソコンのDBに書いてしまうのを防ぐ。
+    実測（2026-09-23）: weekly_scan.py が呼んでおらず、スキャン結果が4日ぶん
+    アプリに届いていなかった。エラーは出ないので気づけない。
+    """
+    global _bridged
+    if _bridged:
+        return
+    _bridged = True
+    try:
+        from modules.config import bridge_secrets_to_env
+        bridge_secrets_to_env()
+    except Exception:
+        pass
+
+
 @contextmanager
 def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    _ensure_secrets()
     turso_url = os.environ.get("TURSO_DATABASE_URL")
     turso_token = os.environ.get("TURSO_AUTH_TOKEN")
     local_conn = sqlite3.connect(str(path or db_path()))
@@ -693,6 +715,12 @@ def upsert_df(table: str, df: pd.DataFrame, columns: Iterable[str],
     columns = list(columns)
     if df is None or df.empty:
         return 0
+    # クラウド(Turso)行きは1回に詰め込みすぎるとタイムアウトする
+    # （実測: chunk=300 で 87,017行の書き込みが途中で落ちた。50なら安定）。
+    # 呼び出し側は行き先を意識しなくてよい約束なので、ここで自動的に絞る。
+    _ensure_secrets()
+    if table in CLOUD_TABLES and os.environ.get("TURSO_DATABASE_URL"):
+        chunk = min(chunk, 50)
     sub = df.reindex(columns=columns)
     placeholders = ",".join("?" * len(columns))
     sql = f"INSERT OR REPLACE INTO {table} ({','.join(columns)}) VALUES ({placeholders})"

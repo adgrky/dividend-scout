@@ -161,9 +161,29 @@ def evaluate(pos: pd.DataFrame, config: dict) -> pd.DataFrame:
                           "景気で配当を動かす会社。増配を積み上げる器ではない"))
         if payout is not None and payout > float(sell.get("payout_unsustainable", 1.0)) \
                 and streak < int(sell.get("payout_grace_streak", 10)):
-            found.append(("売却を検討", "利益を超えて配当を出している",
-                          f"配当性向 {payout:.0%}（100%超）／連続増配 {streak} 年",
-                          "取り崩しで配当を維持している。続かない"))
+            # 配当性向は「直近の実績」で出している。利益が一時的に吹き飛んだ年は、
+            # 恒常的に払いすぎている会社と同じ見た目になる。どちらなのかは
+            # 前の年までの利益と比べないと分からないので、ここで分けて書く。
+            # 会社が決算短信で出す配当性向は**その期の予想**に対する数字なので、
+            # こういう年はそちらと大きく食い違う（実測: 日本製鉄 2026年3月期は
+            # 純利益が 3,502億→172億 と95%落ち、実績ベースでは700%超になる）。
+            prior = [v for v in ni[1:4] if v is not None and v > 0]
+            base_ni = float(np.median(prior)) if prior else None
+            collapsed = (base_ni is not None and ni and ni[0] is not None
+                         and ni[0] < base_ni * 0.4)
+            if collapsed:
+                found.append(("売却を検討", "配当が利益を超えている（今期の利益が落ち込んだため）",
+                              f"配当性向 {payout:.0%}（100%超）／純利益 "
+                              f"{ni[0]/1e8:,.0f}億（前の年までは {base_ni/1e8:,.0f}億）"
+                              f"／連続増配 {streak} 年",
+                              "恒常的に払いすぎているのではなく、利益が落ちた年。"
+                              "会社が出す配当性向（今期予想に対する数字）とは大きく食い違う。"
+                              "**利益が戻るかどうか**で判断が変わるので、これ単独では動かない。"
+                              "減配が実際に起きているかを先に見る"))
+            else:
+                found.append(("売却を検討", "利益を超えて配当を出している",
+                              f"配当性向 {payout:.0%}（100%超）／連続増配 {streak} 年",
+                              "取り崩しで配当を維持している。続かない"))
 
         # ── 🟡 原資が傷んでいる（金融には当てない） ─────────────────
         if not is_fin:
