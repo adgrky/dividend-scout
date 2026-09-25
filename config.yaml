@@ -1,4 +1,4 @@
-# dividend-scout 設定
+# diva 設定
 # 閾値・重みはすべてここに集約する。コードに数値を直書きしない。
 
 universe:

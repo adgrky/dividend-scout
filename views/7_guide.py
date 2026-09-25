@@ -647,7 +647,7 @@ yfinance に回数制限で弾かれるためで、時間の大半はこの待�
 
 ##### 置き場所が デスクトップ だと動きません
 
-このアプリは `~/dev/dividend-scout`（Finder では **ken → dev → dividend-scout**）に
+このアプリは `~/dev/diva`（Finder では **ken → dev → diva**）に
 置いてあります。**デスクトップに戻してはいけません。**
 
 macOS は デスクトップ・書類・ダウンロード を、バックグラウンドのプログラムから
@@ -656,7 +656,7 @@ macOS は デスクトップ・書類・ダウンロード を、バックグラ
 
 実測でこうなっていました。
 
-    読めない×  /Users/ken/Desktop/クロード/dividend-scout
+    読めない×  /Users/ken/Desktop/クロード/diva
     読める      /Users/ken/dev
     読める      /Users/ken/Library/Application Support
     読めない×  /Users/ken/Documents

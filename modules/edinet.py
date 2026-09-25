@@ -30,7 +30,7 @@ from pathlib import Path
 import pandas as pd
 
 _BASE = "https://api.edinet-fsa.go.jp/api/v2"
-_UA = {"User-Agent": "dividend-scout/1.0"}
+_UA = {"User-Agent": "diva/1.0"}
 _DOC_TYPE_YUHO = "120"          # 有価証券報告書
 
 # 「主要な経営指標等の推移」の要素名 → こちらでの列名。

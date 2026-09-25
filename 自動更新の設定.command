@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dividend-scout 自動更新の設定
+# diva 自動更新の設定
 #
 # 毎週土曜の朝に、株価・配当・スコアを自動で取り直すようにします。
 # 設定するかどうかはケンが決めます。ここを実行しないかぎり、何も変わりません。
@@ -17,13 +17,13 @@
 __main_body() {
 cd "$(dirname "$0")"
 APP_DIR="$(pwd)"
-LABEL="com.ken.dividend-scout.weekly"
+LABEL="com.ken.diva.weekly"
 AGENTS="$HOME/Library/LaunchAgents"
 PLIST="$AGENTS/$LABEL.plist"
 
 echo ""
 echo "=================================================="
-echo "  ⏰ dividend-scout 自動更新の設定"
+echo "  ⏰ DIVA 自動更新の設定"
 echo "=================================================="
 echo ""
 
@@ -45,7 +45,7 @@ case "$APP_DIR" in
     echo ""
     echo "     フォルダごと ~/dev/ に移してから、もう一度ここを実行してください。"
     echo "     （移したあとは .venv を作り直す必要があります："
-    echo "       cd ~/dev/dividend-scout && uv venv --python 3.11 --clear && uv pip install -r requirements.txt）"
+    echo "       cd ~/dev/diva && uv venv --python 3.11 --clear && uv pip install -r requirements.txt）"
     pause_exit 1
     ;;
 esac

@@ -592,7 +592,7 @@ def audit_code() -> None:
 
 def main() -> int:
     print("=" * 62)
-    print("  dividend-scout  機械的な検算")
+    print("  diva  機械的な検算")
     print("=" * 62)
     audit_numbers()
     audit_contradictions()

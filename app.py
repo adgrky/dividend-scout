@@ -1,4 +1,4 @@
-"""dividend-scout — 増配期待株の発掘エンジン。
+"""DIVA — 増配期待株の発掘エンジン。
 
 このアプリの本筋は「発掘」。市場に正しく評価されていない増配期待企業を
 全上場から探して提示する。保有管理と資金配分は、発掘した銘柄を
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-st.set_page_config(page_title="dividend-scout", page_icon="🔭", layout="wide")
+st.set_page_config(page_title="DIVA", page_icon="🔭", layout="wide")
 
 from modules.config import bridge_secrets_to_env   # noqa: E402
 from modules.store import init_db                  # noqa: E402

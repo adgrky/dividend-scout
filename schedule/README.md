@@ -8,7 +8,7 @@
 
 ## 中で何が起きているか
 
-オンにすると `~/Library/LaunchAgents/com.ken.dividend-scout.weekly.plist` が
+オンにすると `~/Library/LaunchAgents/com.ken.diva.weekly.plist` が
 1つ置かれ、Mac に「毎週土曜9時に `scripts/scheduled_update.py` を走らせて」と
 伝えます。オフにすると、そのファイルを外して消します。他のアプリには影響しません。
 
@@ -24,6 +24,6 @@
 
 ## このフォルダに残っている古いファイル
 
-`com.ken.dividend-scout.weekly.plist` と `com.ken.dividend-scout.daily.plist` は、
+`com.ken.diva.weekly.plist` と `com.ken.diva.daily.plist` は、
 `自動更新の設定.command` を作る前の手書きの見本です。**いまは使っていません。**
 daily のほうは ntfy 通知を前提にしていますが、通知は使わない方針になりました。
